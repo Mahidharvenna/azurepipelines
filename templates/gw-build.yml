@@ -1,0 +1,78 @@
+# =============================================================================
+# Reusable build template for a Guidewire product (PC / BC / CC)
+# Mirrors the classic build pipelines (PC-prod*, BC-*, CC-prod*).
+# =============================================================================
+
+parameters:
+- name: comp
+  type: string
+  values: [pc, bc, cc, cm]
+- name: repo
+  type: string
+  default: self
+- name: poolName
+  type: string
+  default: Default
+
+jobs:
+- job: Build_${{ upper(parameters.comp) }}
+  displayName: '${{ upper(parameters.comp) }} Build'
+  pool:
+    name: ${{ parameters.poolName }}
+  workspace:
+    clean: all
+  steps:
+
+  - checkout: ${{ parameters.repo }}
+    clean: true
+
+  - task: CopyFiles@2
+    displayName: 'Copy GWR10 Core to: $(Build.Repository.LocalPath)'
+    inputs:
+      SourceFolder: 'C:\path\to\gw-core\${{ upper(parameters.comp) }}'
+      Contents: '**'
+      TargetFolder: '$(Build.Repository.LocalPath)'
+
+  - task: CmdLine@2
+    displayName: 'Run: gwb.bat clean'
+    inputs:
+      workingDirectory: '$(Build.Repository.LocalPath)'
+      script: 'gwb.bat clean'
+
+  # PC-only: remove example Jurisdiction file (tolerant if missing)
+  - ${{ if eq(parameters.comp, 'pc') }}:
+    - task: CmdLine@2
+      displayName: 'Remove Jurisdiction.example.ttx'
+      inputs:
+        script: >
+          if exist "$(Build.Repository.LocalPath)\modules\configuration\config\extensions\typelist\Jurisdiction.example.ttx"
+          del "$(Build.Repository.LocalPath)\modules\configuration\config\extensions\typelist\Jurisdiction.example.ttx"
+
+  - task: CmdLine@2
+    displayName: 'Run: gwb.bat webResources'
+    inputs:
+      workingDirectory: '$(Build.Repository.LocalPath)'
+      script: 'gwb.bat webResources'
+
+  # Note: gwb.bat genDataDictionary intentionally omitted (was disabled in classic build)
+
+  - task: CmdLine@2
+    displayName: 'Run: gwb.bat warTomcatDBCP'
+    inputs:
+      workingDirectory: '$(Build.Repository.LocalPath)'
+      script: 'gwb.bat warTomcatDBCP'
+
+  - task: CopyFiles@2
+    displayName: 'Copy WAR files to staging'
+    condition: succeededOrFailed()
+    inputs:
+      SourceFolder: '$(Build.SourcesDirectory)'
+      Contents: '**/*.war'
+      TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish Artifact: ${{ parameters.comp }}-drop'
+    condition: succeededOrFailed()
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)'
+      artifactName: '${{ parameters.comp }}-drop'

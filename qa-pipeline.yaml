@@ -1,0 +1,50 @@
+# =============================================================================
+# MyOrg -- QA pipeline
+# Build and deploy PC / BC / CC to any QA instance (QA1, QA2, ...)
+# All logic lives in templates/tier-orchestrator.yml (shared across tiers).
+# =============================================================================
+
+trigger: none
+pr: none
+
+parameters:
+- name: releaseBranch
+  displayName: 'Release branch (e.g. release/v1.0)'
+  type: string
+  default: 'release/v1.0'
+
+- name: envInstance
+  displayName: 'QA instance'
+  type: string
+  default: '1'
+  values: ['1', '2', '3']
+
+- name: deployPC
+  displayName: 'Build & deploy PolicyCenter'
+  type: boolean
+  default: false
+- name: deployBC
+  displayName: 'Build & deploy BillingCenter'
+  type: boolean
+  default: false
+- name: deployCC
+  displayName: 'Build & deploy ClaimCenter'
+  type: boolean
+  default: false
+- name: deployCM
+  displayName: 'Build & deploy ContactManager'
+  type: boolean
+  default: false
+
+name: 'MyOrg-QA${{ parameters.envInstance }}-${{ parameters.releaseBranch }}-$(Date:yyyyMMdd).$(Rev:r)'
+
+extends:
+  template: templates/tier-orchestrator.yml
+  parameters:
+    envTier: qa
+    releaseBranch: ${{ parameters.releaseBranch }}
+    envInstance: ${{ parameters.envInstance }}
+    deployPC: ${{ parameters.deployPC }}
+    deployBC: ${{ parameters.deployBC }}
+    deployCC: ${{ parameters.deployCC }}
+    deployCM: ${{ parameters.deployCM }}

@@ -1,0 +1,360 @@
+# =============================================================================
+# Reusable deploy template -- 1:1 translation of GW_TEM_Deployment task group.
+# 15 tasks: pre-deploy DB write, shutdown, cleanup, copy WAR, configure, start,
+# log on failure, post-deploy DB write.
+# =============================================================================
+
+parameters:
+- name: comp                    # pc, bc, cc, ab  (CM uses 'ab' for legacy reasons -- see <env>-CM release)
+  type: string
+- name: env                     # dev, qa, etc. (tier only, used in log paths)
+  type: string
+- name: envLabel                # full env label (e.g. dev1, qa2) -- maps to ADO Environment
+  type: string
+- name: envName                 # stage label for Dashboard rows: PC-DEV1, BC-DEV1, CM-DEV1, ...
+  type: string
+- name: sshConnection           # ADO SSH service-connection name (e.g. <env>-PC, <env>-CM)
+  type: string
+- name: catalinaBase
+  type: string
+  default: '/opt/tomcat/apache-tomcat'
+- name: releaseBranch
+  type: string
+- name: artifactName            # name of the pipeline artifact to download (e.g. pc-drop, cm-drop)
+  type: string
+- name: poolName
+  type: string
+  default: Default
+
+jobs:
+- deployment: Deploy_${{ upper(parameters.comp) }}
+  displayName: 'Deploy ${{ upper(parameters.comp) }} to ${{ upper(parameters.envLabel) }}'
+  environment: '${{ parameters.envLabel }}'   # ADO Environment named e.g. dev1, dev2, qa1
+  pool:
+    name: ${{ parameters.poolName }}
+  strategy:
+    runOnce:
+      deploy:
+        steps:
+
+        - download: current
+          artifact: ${{ parameters.artifactName }}
+
+        # --- 1. Pre-deployment: insert "Started" row in Dashboard DB ---
+        - task: PowerShell@2
+          displayName: 'Pre-Deployment - Update Dashboard DB'
+          inputs:
+            targetType: inline
+            errorActionPreference: stop
+            failOnStderr: false
+            script: |
+              $connectionString = "Server=$(DBINSTANCE);Database=$(DBNAME);user=$(DBUSER);password=$(DBPASS)"
+              $releaseNotesLogTableName = "dbo.ReleaseNotesLog"
+              $currentBuildTableName    = "dbo.CurrentBuild"
+
+              function ExecuteSqlQuery {
+                param ([string]$ConnectionString, [string]$Query, [bool]$ReturnData = $false)
+                Add-Type -AssemblyName "System.Data"
+                $connection = New-Object System.Data.SqlClient.SqlConnection $ConnectionString
+                $command = $connection.CreateCommand()
+                $command.CommandText = $Query
+                try {
+                  $connection.Open()
+                  if ($ReturnData) { return $command.ExecuteScalar() }
+                  else { $command.ExecuteNonQuery() | Out-Null }
+                } catch { Write-Host "SQL error: $_"; exit 1 }
+                finally { $connection.Close() }
+              }
+
+              $previousBuildID = ExecuteSqlQuery -ConnectionString $connectionString `
+                -Query "SELECT CurrentBuildID from $currentBuildTableName where StageName = '${{ parameters.envName }}'" `
+                -ReturnData $true
+
+              if ($null -eq $previousBuildID) {
+                ExecuteSqlQuery -ConnectionString $connectionString -Query @"
+              INSERT INTO $currentBuildTableName (StageName, CurrentBuildID, SourceBranch)
+              VALUES ('${{ parameters.envName }}', '$(Build.BuildId)', '${{ parameters.releaseBranch }}')
+              "@
+              }
+
+              ExecuteSqlQuery -ConnectionString $connectionString -Query @"
+              INSERT INTO $releaseNotesLogTableName (BuildName, SourceBranch, PreviousBuildID, ReleaseName, RunName, StageName, Attempt, Status)
+              VALUES ('$(Build.DefinitionName)', '${{ parameters.releaseBranch }}', '$previousBuildID', '$(Build.BuildNumber)', '$(Build.BuildNumber)', '${{ parameters.envName }}', '$(System.JobAttempt)', 'Started')
+              "@
+
+        # --- 2. Shutdown Guidewire ---
+        - task: SSH@0
+          displayName: 'Shutdown the Guidewire Service'
+          continueOnError: true
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: inline
+            interpreterCommand: '/bin/bash'
+            inline: '${{ parameters.catalinaBase }}/bin/forceShutDown.sh'
+            failOnStdErr: false
+            readyTimeout: '20000'
+
+        # --- 3. Trim catalina.out ---
+        - task: SSH@0
+          displayName: 'Trimming catalina.out'
+          continueOnError: true
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: inline
+            interpreterCommand: '/bin/bash'
+            inline: |
+              source ~/.gwr_profile
+              LOG_FILE=$CATALINA_OUT
+              LINES_TO_KEEP=2000
+              if [[ -f "$LOG_FILE" ]]; then
+                tail -n "$LINES_TO_KEEP" "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+                echo "--- Trimming complete ---"
+              else
+                echo "-> File '$LOG_FILE' not found. Skipping."
+              fi
+            readyTimeout: '20000'
+
+        # --- 4. Delete log files older than 60 days (skip for ab) ---
+        - task: SSH@0
+          displayName: 'Delete log files older than 60 days'
+          continueOnError: true
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: inline
+            interpreterCommand: '/bin/bash'
+            inline: |
+              if [[ "ab" = "${{ parameters.comp }}" ]]; then
+                echo "Log files are not deleted for ab"
+              else
+                find /var/app/logs/${{ parameters.env }}/${{ parameters.comp }}/gw -name "*.log.*" -mtime +60 -type f -exec rm -rf {} \;
+              fi
+            readyTimeout: '20000'
+
+        # --- 5. Delete war files older than 5 days ---
+        - task: SSH@0
+          displayName: 'Delete war files older than 5 days'
+          continueOnError: true
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: inline
+            interpreterCommand: '/bin/bash'
+            inline: |
+              find ${{ parameters.catalinaBase }}/webapps -name "${{ parameters.comp }}.war?*" -mtime +5 -exec ls -lrt {} \;
+              find ${{ parameters.catalinaBase }}/webapps -name "${{ parameters.comp }}.war?*" -mtime +5 -exec rm -vf {} \;
+            readyTimeout: '20000'
+
+        # --- 6. Backup existing WAR ---
+        - task: SSH@0
+          displayName: 'Take a Backup of existing war file if present'
+          continueOnError: true
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: inline
+            interpreterCommand: '/bin/bash'
+            inline: |
+              if [ -f ${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}.war ]; then
+                mv ${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}.war \
+                   ${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}.war_`date +"%Y%m%d@%H%M"`
+              fi
+            readyTimeout: '20000'
+
+        # --- 7. Copy new WAR to server ---
+        - task: CopyFilesOverSSH@0
+          displayName: 'Copy Latest war file to Server'
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            sourceFolder: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dist/wars/TomcatDbcp/'
+            contents: '**/*.war'
+            targetFolder: '${{ parameters.catalinaBase }}/webapps'
+            isWindowsOnTarget: false
+            overwrite: true
+            cleanTargetFolder: false
+            cleanHiddenFilesInTarget: false
+            failOnEmptySource: false
+            flattenFolders: false
+            readyTimeout: '20000'
+
+        # --- 8. Remove old extracted webapp dir ---
+        - task: SSH@0
+          displayName: 'Delete the existing deployed webapps location'
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: commands
+            commands: 'rm -rf ${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}'
+            readyTimeout: '20000'
+
+        # --- 9. Unzip new WAR ---
+        - task: SSH@0
+          displayName: 'Extract newly deployed war file'
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: commands
+            commands: 'unzip ${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}.war -d ${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}'
+            readyTimeout: '20000'
+
+        # --- 10. Replace GWR user password in config files ---
+        - task: SSH@0
+          displayName: 'Replace GWR user Password'
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: inline
+            interpreterCommand: '/bin/bash'
+            failOnStdErr: true
+            inline: |
+              case "${{ parameters.comp }}" in
+                pc) gwruser_dbpass="$(pc_userpass)" ;;
+                bc) gwruser_dbpass="$(bc_userpass)" ;;
+                cc) gwruser_dbpass="$(cc_userpass)" ;;
+                ab) gwruser_dbpass="$(ab_userpass)" ;;
+              esac
+              BASE_DIR=${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}/modules/configuration
+              for f in \
+                "$BASE_DIR/gsrc/pmt/pc/ext/DBintegration/config/DBintegration.properties" \
+                "$BASE_DIR/gsrc/ext/DBintegration/config/DBintegration.properties" \
+                "$BASE_DIR/gsrc/pmt/pc/configuration/config/pmt.properties" \
+                "$BASE_DIR/config/integrationext/integration_ext.properties" \
+                "$BASE_DIR/config/integrationext/integration/config/pmt.properties" ; do
+                if [ -f "$f" ]; then sed -i "s/guidewire/$gwruser_dbpass/g" "$f"; fi
+              done
+              if [ -f "$BASE_DIR/config/database-config.xml" ]; then
+                sed -i "s/Password=[^=]*/Password=$gwruser_dbpass/" "$BASE_DIR/config/database-config.xml"
+              fi
+            readyTimeout: '20000'
+
+        # --- 11. Swap prod mail domain -> dev mail domain ---
+        - task: SSH@0
+          displayName: 'Replace prod mail id in ScriptParameters.xml'
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: inline
+            interpreterCommand: '/bin/bash'
+            inline: |
+              sed -i 's/@example.com/@internal.example.com/g' \
+                ${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}/modules/configuration/config/resources/ScriptParameters.xml
+            readyTimeout: '20000'
+
+        # --- 12. Update log dir in log4j2.xml ---
+        - task: SSH@0
+          displayName: 'Update the log directory to ${{ parameters.env }}'
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: inline
+            interpreterCommand: '/bin/bash'
+            inline: |
+              LOG4J=${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}/modules/configuration/config/logging/log4j2.xml
+              cat $LOG4J | grep 'guidewire.logDirectory' || true
+              sed -i 's|/env/|/${{ parameters.env }}/|g' $LOG4J
+              cat $LOG4J | grep 'guidewire.logDirectory' || true
+            readyTimeout: '20000'
+
+        # --- 13. Start Guidewire ---
+        - task: SSH@0
+          displayName: 'Start the Guidewire Service'
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: inline
+            interpreterCommand: '/bin/bash'
+            inline: '${{ parameters.catalinaBase }}/bin/validateStartUp.sh'
+            failOnStdErr: false
+            readyTimeout: '20000'
+
+        # --- 14. Dump last 500 log lines on failure ---
+        - task: SSH@0
+          displayName: 'Display last 500 lines of Application log (on failure)'
+          condition: failed()
+          inputs:
+            sshEndpoint: ${{ parameters.sshConnection }}
+            runOptions: inline
+            interpreterCommand: '/bin/bash'
+            inline: |
+              source ~/.gwr_profile
+              tail -500 $CATALINA_OUT
+            readyTimeout: '20000'
+
+        # --- 15. Post-deployment: write commits + final status to Dashboard DB ---
+        - task: PowerShell@2
+          displayName: 'Post-Deployment - Update Dashboard DB'
+          condition: always()
+          env:
+            SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          inputs:
+            targetType: inline
+            errorActionPreference: stop
+            failOnStderr: false
+            script: |
+              $connectionString = "Server=$(DBINSTANCE);Database=$(DBNAME);user=$(DBUSER);password=$(DBPASS)"
+              $releaseNotesTableName    = "dbo.ReleaseNotes"
+              $releaseNotesLogTableName = "dbo.ReleaseNotesLog"
+              $currentBuildTableName    = "dbo.CurrentBuild"
+              $projectName              = "MyOrg"
+
+              function ExecuteSqlQuery {
+                param ([string]$ConnectionString, [string]$Query, [bool]$ReturnData = $false)
+                Add-Type -AssemblyName "System.Data"
+                $connection = New-Object System.Data.SqlClient.SqlConnection $ConnectionString
+                $command = $connection.CreateCommand()
+                $command.CommandText = $Query
+                try {
+                  $connection.Open()
+                  if ($ReturnData) { return $command.ExecuteScalar() }
+                  else { $command.ExecuteNonQuery() | Out-Null }
+                } catch { Write-Host "SQL error: $_"; exit 1 }
+                finally { $connection.Close() }
+              }
+
+              function GETCHANGES {
+                param ([Parameter(Mandatory=$true)][string]$FROMBUILD)
+                if ($FROMBUILD -eq '$(Build.BuildId)') { return @{count = -1} }
+                if ([int]$FROMBUILD -gt [int]'$(Build.BuildId)') { return @{count = 0} }
+                $url = "https://your-ado-host.example.com/your-collection/$projectName/_apis/build/changes?fromBuildId=$FROMBUILD&toBuildId=$(Build.BuildId)"
+                $headers = @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
+                $resp = Invoke-WebRequest -Uri $url -Headers $headers -UseBasicParsing
+                return ($resp.Content | ConvertFrom-Json)
+              }
+
+              $previousBranch = ExecuteSqlQuery -ConnectionString $connectionString `
+                -Query "SELECT SourceBranch from $currentBuildTableName where StageName = '${{ parameters.envName }}'" `
+                -ReturnData $true
+
+              if ($previousBranch -eq '${{ parameters.releaseBranch }}') {
+                $FROMBUILD = ExecuteSqlQuery -ConnectionString $connectionString `
+                  -Query "SELECT CurrentBuildID from $currentBuildTableName where StageName = '${{ parameters.envName }}'" `
+                  -ReturnData $true
+                Write-Output "FROMBUILD = $FROMBUILD"
+                $PARSED = GETCHANGES -FROMBUILD $FROMBUILD
+                Write-Output "Number of changes = $($PARSED.count)"
+                if ($PARSED.count -gt 0) {
+                  foreach ($v in $PARSED.value) {
+                    $msg = $v.message.Replace("'","''")
+                    ExecuteSqlQuery -ConnectionString $connectionString -Query @"
+              INSERT INTO $releaseNotesTableName (ReleaseName, StageName, BuildName, SourceBranch, CommitInfo, CommitAuthor, CommitTimestamp)
+              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '${{ parameters.releaseBranch }}', '$msg', '$($v.author.displayName)', '$($v.timestamp)')
+              "@
+                  }
+                  $finalStatus = 'Completed'
+                } elseif ($PARSED.count -lt 0) {
+                  $finalStatus = 'Downgrade'
+                } else {
+                  $finalStatus = 'No Changes'
+                }
+              } else {
+                ExecuteSqlQuery -ConnectionString $connectionString -Query @"
+              INSERT INTO $releaseNotesTableName (ReleaseName, StageName, BuildName, SourceBranch, CommitInfo, CommitAuthor, CommitTimestamp)
+              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '${{ parameters.releaseBranch }}', 'SourceBranch Changed', 'NA', 'NA')
+              "@
+                $finalStatus = 'SourceBranch Changed'
+              }
+
+              ExecuteSqlQuery -ConnectionString $connectionString -Query @"
+              UPDATE $releaseNotesLogTableName SET Status = '$finalStatus'
+              WHERE ReleaseName = '${{ parameters.envName }}'
+                AND RunName     = '$(Build.BuildNumber)'
+                AND Attempt     = '$(System.JobAttempt)'
+              "@
+
+              ExecuteSqlQuery -ConnectionString $connectionString -Query @"
+              UPDATE $currentBuildTableName
+              SET SourceBranch   = '${{ parameters.releaseBranch }}',
+                  CurrentBuildID = '$(Build.BuildId)'
+              WHERE StageName    = '${{ parameters.envName }}'
+              "@

@@ -1,0 +1,147 @@
+# =============================================================================
+# SHARED orchestrator -- the body of every per-tier pipeline.
+# Called via `extends:` from dev/qa/uat/preprod-pipeline.yaml.
+# Holds resources, variables, stages. Change here = change everywhere.
+# =============================================================================
+
+parameters:
+- name: envTier               # dev, qa, uat, preprod -- set by the entry pipeline
+  type: string
+- name: releaseBranch         # passed through from queue parameter
+  type: string
+- name: envInstance           # 1, 2, 3 ... -- passed through from queue parameter
+  type: string
+- name: deployPC
+  type: boolean
+- name: deployBC
+  type: boolean
+- name: deployCC
+  type: boolean
+- name: deployCM
+  type: boolean
+
+resources:
+  repositories:
+  - repository: pc
+    type: git
+    name: MyOrg/PC
+    ref: refs/heads/${{ parameters.releaseBranch }}
+  - repository: bc
+    type: git
+    name: MyOrg/BC
+    ref: refs/heads/${{ parameters.releaseBranch }}
+  - repository: cc
+    type: git
+    name: MyOrg/CC
+    ref: refs/heads/${{ parameters.releaseBranch }}
+  - repository: cm
+    type: git
+    name: MyOrg/CM
+    ref: refs/heads/${{ parameters.releaseBranch }}
+
+variables:
+- group: 'deployment-secrets'
+- name: catalinaBase
+  value: '/opt/tomcat/apache-tomcat'          # PC/BC/CC default
+- name: catalinaBaseCM
+  value: '/opt/tomcat-cm/apache-tomcat'       # CM lives in its own Tomcat
+
+stages:
+
+# --------------------------------------------------------------------------
+# STAGE 0 : Validation -- fail fast if nothing is selected
+# --------------------------------------------------------------------------
+- ${{ if and(eq(parameters.deployPC, false), eq(parameters.deployBC, false), eq(parameters.deployCC, false), eq(parameters.deployCM, false)) }}:
+  - stage: Validate
+    displayName: 'Validate selection'
+    jobs:
+    - job: NothingSelected
+      displayName: 'No products selected'
+      pool:
+        name: Default
+      steps:
+      - checkout: none
+      - script: |
+          echo "##vso[task.logissue type=error]No products were selected to build/deploy."
+          echo "##vso[task.logissue type=error]Re-queue and check at least one of PolicyCenter / BillingCenter / ClaimCenter / ContactManager."
+          exit 1
+        displayName: 'Fail with helpful message'
+
+# --------------------------------------------------------------------------
+# STAGE 1 : BUILD (only selected products run, in parallel)
+# --------------------------------------------------------------------------
+- ${{ if or(eq(parameters.deployPC, true), eq(parameters.deployBC, true), eq(parameters.deployCC, true), eq(parameters.deployCM, true)) }}:
+  - stage: Build
+    displayName: 'Build selected products'
+    jobs:
+    - ${{ if eq(parameters.deployPC, true) }}:
+      - template: gw-build.yml
+        parameters: { comp: pc, repo: pc, poolName: Default }
+    - ${{ if eq(parameters.deployBC, true) }}:
+      - template: gw-build.yml
+        parameters: { comp: bc, repo: bc, poolName: Default }
+    - ${{ if eq(parameters.deployCC, true) }}:
+      - template: gw-build.yml
+        parameters: { comp: cc, repo: cc, poolName: Default }
+    - ${{ if eq(parameters.deployCM, true) }}:
+      - template: gw-build.yml
+        parameters: { comp: cm, repo: cm, poolName: Default }
+
+# --------------------------------------------------------------------------
+# STAGE 2 : DEPLOY to <TIER><INSTANCE>
+# --------------------------------------------------------------------------
+- ${{ if or(eq(parameters.deployPC, true), eq(parameters.deployBC, true), eq(parameters.deployCC, true), eq(parameters.deployCM, true)) }}:
+  - stage: Deploy
+    displayName: 'Deploy to ${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+    - ${{ if eq(parameters.deployPC, true) }}:
+      - template: gw-deploy.yml
+        parameters:
+          comp: pc
+          env: ${{ parameters.envTier }}
+          envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
+          envName: 'PC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+          sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-PC'
+          catalinaBase: $(catalinaBase)
+          artifactName: 'pc-drop'
+          releaseBranch: ${{ parameters.releaseBranch }}
+          poolName: Default
+    - ${{ if eq(parameters.deployBC, true) }}:
+      - template: gw-deploy.yml
+        parameters:
+          comp: bc
+          env: ${{ parameters.envTier }}
+          envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
+          envName: 'BC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+          sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-BC'
+          catalinaBase: $(catalinaBase)
+          artifactName: 'bc-drop'
+          releaseBranch: ${{ parameters.releaseBranch }}
+          poolName: Default
+    - ${{ if eq(parameters.deployCC, true) }}:
+      - template: gw-deploy.yml
+        parameters:
+          comp: cc
+          env: ${{ parameters.envTier }}
+          envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
+          envName: 'CC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+          sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-CC'
+          catalinaBase: $(catalinaBase)
+          artifactName: 'cc-drop'
+          releaseBranch: ${{ parameters.releaseBranch }}
+          poolName: Default
+    # --- CM is special: COMP=ab (legacy), different CATALINA_BASE, but artifact is 'cm-drop' ---
+    - ${{ if eq(parameters.deployCM, true) }}:
+      - template: gw-deploy.yml
+        parameters:
+          comp: ab                                                   # match the classic <env>-CM release (COMP=ab)
+          env: ${{ parameters.envTier }}
+          envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
+          envName: 'CM-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+          sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-CM'
+          catalinaBase: $(catalinaBaseCM)                            # /opt/tomcat-cm/apache-tomcat
+          artifactName: 'cm-drop'                                    # downloads what gw-build.yml produced
+          releaseBranch: ${{ parameters.releaseBranch }}
+          poolName: Default
