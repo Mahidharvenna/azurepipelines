@@ -24,19 +24,19 @@ resources:
   repositories:
   - repository: pc
     type: git
-    name: MyOrg/PC
+    name: PC
     ref: refs/heads/${{ parameters.releaseBranch }}
   - repository: bc
     type: git
-    name: MyOrg/BC
+    name: BC
     ref: refs/heads/${{ parameters.releaseBranch }}
   - repository: cc
     type: git
-    name: MyOrg/CC
+    name: CC
     ref: refs/heads/${{ parameters.releaseBranch }}
   - repository: cm
     type: git
-    name: MyOrg/CM
+    name: CM
     ref: refs/heads/${{ parameters.releaseBranch }}
 
 variables:
