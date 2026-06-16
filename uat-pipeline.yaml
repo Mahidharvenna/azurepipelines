@@ -9,9 +9,9 @@ pr: none
 
 parameters:
 - name: releaseBranch
-  displayName: 'Release branch (e.g. release/v1.0)'
+  displayName: 'Release branch (REQUIRED)'
   type: string
-  default: 'release/v1.0'
+  default: ''
 
 - name: envInstance
   displayName: 'UAT instance'
