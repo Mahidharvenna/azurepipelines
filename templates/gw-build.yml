@@ -82,9 +82,12 @@ jobs:
       Contents: '**/*.war'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
-  - task: PublishPipelineArtifact@1
+  # NOTE: PublishPipelineArtifact@1 is NOT supported on ADO Server (on-prem).
+  # Using the older PublishBuildArtifacts@1 task instead -- same outcome.
+  - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifact: ${{ parameters.comp }}-drop'
     condition: succeededOrFailed()
     inputs:
-      targetPath: '$(Build.ArtifactStagingDirectory)'
-      artifactName: '${{ parameters.comp }}-drop'
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+      ArtifactName: '${{ parameters.comp }}-drop'
+      publishLocation: 'Container'
