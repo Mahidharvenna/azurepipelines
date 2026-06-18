@@ -25,9 +25,18 @@ jobs:
     clean: all
   steps:
 
+  # ADO Server 2022 RTW does not allow `ref:` on `checkout:` (added in later updates).
+  # We checkout the resource's default ref, then switch branches with a git command.
   - checkout: ${{ parameters.repo }}
-    ref: refs/heads/${{ parameters.releaseBranch }}    # actual branch selection happens here
     clean: true
+    persistCredentials: true       # keep agent git auth so the next step can fetch/checkout
+
+  - script: |
+      git fetch origin ${{ parameters.releaseBranch }}
+      git checkout ${{ parameters.releaseBranch }}
+      git log -1 --oneline
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    displayName: 'Switch to release branch: ${{ parameters.releaseBranch }}'
 
   - task: CopyFiles@2
     displayName: 'Copy GWR10 Core to: $(Build.Repository.LocalPath)'
