@@ -13,6 +13,8 @@ parameters:
 - name: poolName
   type: string
   default: Default
+- name: releaseBranch          # branch to check out from the product repo
+  type: string
 
 jobs:
 - job: Build_${{ upper(parameters.comp) }}
@@ -24,6 +26,7 @@ jobs:
   steps:
 
   - checkout: ${{ parameters.repo }}
+    ref: refs/heads/${{ parameters.releaseBranch }}    # actual branch selection happens here
     clean: true
 
   - task: CopyFiles@2

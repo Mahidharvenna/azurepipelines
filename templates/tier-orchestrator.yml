@@ -22,25 +22,27 @@ parameters:
 
 resources:
   repositories:
+  # Same-project Azure Repos Git -- no project prefix needed.
+  # NOTE: ref is intentionally omitted here. ADO Server 2022 RTW does not
+  # allow template expressions in resources.repositories[].ref. The actual
+  # branch is set at checkout time inside gw-build.yml via:
+  #   - checkout: <repo>
+  #     ref: refs/heads/${{ parameters.releaseBranch }}
   - repository: pc
     type: git
     name: PC
-    ref: refs/heads/${{ parameters.releaseBranch }}
   - repository: bc
     type: git
     name: BC
-    ref: refs/heads/${{ parameters.releaseBranch }}
   - repository: cc
     type: git
     name: CC
-    ref: refs/heads/${{ parameters.releaseBranch }}
   - repository: cm
     type: git
     name: CM
-    ref: refs/heads/${{ parameters.releaseBranch }}
 
 variables:
-- group: 'deployment-secrets'
+- group: 'Dashboard DB'
 - name: catalinaBase
   value: '/opt/tomcat/apache-tomcat'          # PC/BC/CC default
 - name: catalinaBaseCM
@@ -76,16 +78,32 @@ stages:
     jobs:
     - ${{ if eq(parameters.deployPC, true) }}:
       - template: gw-build.yml
-        parameters: { comp: pc, repo: pc, poolName: Default }
+        parameters:
+          comp: pc
+          repo: pc
+          poolName: Default
+          releaseBranch: ${{ parameters.releaseBranch }}
     - ${{ if eq(parameters.deployBC, true) }}:
       - template: gw-build.yml
-        parameters: { comp: bc, repo: bc, poolName: Default }
+        parameters:
+          comp: bc
+          repo: bc
+          poolName: Default
+          releaseBranch: ${{ parameters.releaseBranch }}
     - ${{ if eq(parameters.deployCC, true) }}:
       - template: gw-build.yml
-        parameters: { comp: cc, repo: cc, poolName: Default }
+        parameters:
+          comp: cc
+          repo: cc
+          poolName: Default
+          releaseBranch: ${{ parameters.releaseBranch }}
     - ${{ if eq(parameters.deployCM, true) }}:
       - template: gw-build.yml
-        parameters: { comp: cm, repo: cm, poolName: Default }
+        parameters:
+          comp: cm
+          repo: cm
+          poolName: Default
+          releaseBranch: ${{ parameters.releaseBranch }}
 
 # --------------------------------------------------------------------------
 # STAGE 2 : DEPLOY to <TIER><INSTANCE>
@@ -136,7 +154,7 @@ stages:
     - ${{ if eq(parameters.deployCM, true) }}:
       - template: gw-deploy.yml
         parameters:
-          comp: ab                                                   # match the classic <env>-CM release (COMP=ab)
+          comp: ab                                                   # match the classic DEV1-CM release (COMP=ab)
           env: ${{ parameters.envTier }}
           envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
           envName: 'CM-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
