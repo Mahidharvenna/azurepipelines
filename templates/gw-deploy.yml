@@ -5,7 +5,7 @@
 # =============================================================================
 
 parameters:
-- name: comp                    # pc, bc, cc, ab  (CM uses 'ab' for legacy reasons -- see <env>-CM release)
+- name: comp                    # pc, bc, cc, ab  (CM uses 'ab' for legacy reasons -- see DEV1-CM release)
   type: string
 - name: env                     # dev, qa, etc. (tier only, used in log paths)
   type: string
@@ -13,7 +13,7 @@ parameters:
   type: string
 - name: envName                 # stage label for Dashboard rows: PC-DEV1, BC-DEV1, CM-DEV1, ...
   type: string
-- name: sshConnection           # ADO SSH service-connection name (e.g. <env>-PC, <env>-CM)
+- name: sshConnection           # ADO SSH service-connection name (e.g. DEV1-PC, DEV1-CM)
   type: string
 - name: catalinaBase
   type: string
@@ -37,8 +37,15 @@ jobs:
       deploy:
         steps:
 
-        - download: current
-          artifact: ${{ parameters.artifactName }}
+        # Note: DownloadBuildArtifacts@1 is not available on ADO Server 2022 RTW;
+        # use @0 which has been stable on-prem for years.
+        - task: DownloadBuildArtifacts@0
+          displayName: 'Download ${{ parameters.artifactName }}'
+          inputs:
+            buildType: 'current'
+            downloadType: 'single'
+            artifactName: '${{ parameters.artifactName }}'
+            downloadPath: '$(Pipeline.Workspace)'
 
         # --- 1. Pre-deployment: insert "Started" row in Dashboard DB ---
         - task: PowerShell@2
