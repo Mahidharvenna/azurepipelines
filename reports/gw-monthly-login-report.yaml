@@ -1,0 +1,78 @@
+# =============================================================================
+# Scheduled monthly Guidewire login report.
+# Queries Loki for "User Login" events per environment, builds an Excel file,
+# emails it, and stashes the xlsx as a build artifact.
+#
+# Runs 06:00 UTC on the 1st of each month -> reports the previous calendar month.
+# Register as its own pipeline (Pipelines -> New -> Existing YAML file).
+# =============================================================================
+
+schedules:
+- cron: '0 6 1 * *'                 # 06:00 UTC, day 1 of every month
+  displayName: 'GW monthly login report'
+  branches:
+    include: [master]
+  always: true                      # send regardless of commits since last run
+
+trigger: none
+pr: none
+
+name: 'GW-LoginReport-$(Date:yyyyMMdd).$(Rev:r)'
+
+# Optional manual override for testing a specific month (YYYY-MM); blank = last month.
+parameters:
+- name: testMonth
+  displayName: 'Test month override (YYYY-MM, blank = last full month)'
+  type: string
+  default: ''
+
+pool:
+  name: Default                     # your self-hosted pool
+
+variables:
+- group: 'gw-reports-secrets'       # create this Variable Group in Library (see README)
+
+steps:
+- checkout: self
+  clean: true
+  persistCredentials: false
+
+- task: UsePythonVersion@0
+  displayName: 'Use Python 3.x'
+  inputs:
+    versionSpec: '3.x'
+    addToPath: true
+
+- script: python -m pip install --upgrade pip requests openpyxl
+  displayName: 'Install Python dependencies'
+
+- script: python reports/monthly_report.py
+  displayName: 'Generate and email login report'
+  workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    # --- Loki ---
+    LOKI_URL:        $(LOKI_URL)
+    LOKI_VERIFY_TLS: $(LOKI_VERIFY_TLS)     # 'false' if the agent doesn't trust the cert
+    LOKI_PROJECT:    $(LOKI_PROJECT)        # value of your Loki `project` label
+    # --- SMTP ---
+    SMTP_HOST: $(SMTP_HOST)
+    SMTP_PORT: $(SMTP_PORT)
+    SMTP_TLS:  $(SMTP_TLS)
+    SMTP_USER: $(SMTP_USER)
+    SMTP_PASS: $(SMTP_PASS)
+    # --- Report ---
+    FROM_ADDR: $(FROM_ADDR)
+    TO_ADDRS:  $(TO_ADDRS)
+    ENVS:      $(ENVS)                       # e.g. DEV1,QA1,UAT1,PROD1  (match Loki env label casing)
+    PRODUCTS:  $(PRODUCTS)                   # e.g. pc   (or pc,bc,cc,cm)
+    OUTPUT_DIR: '$(Build.ArtifactStagingDirectory)'
+    TEST_MONTH: ${{ parameters.testMonth }}
+
+# Keep a copy of the spreadsheet attached to the run for re-download/audit.
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish xlsx as build artifact'
+  condition: succeededOrFailed()
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+    ArtifactName: 'monthly-report'
+    publishLocation: 'Container'
