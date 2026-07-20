@@ -71,7 +71,7 @@
   "UAT11": {
     "branch": "maintenance/rel-2026.08",
     "products": ["pc", "bc", "cc"],
-    "genDataDictionary": true
+    "genDataDictionary": ["pc", "bc", "cc"]
   },
   "UAT3": {
     "branch": "releases/rel-2026.04",

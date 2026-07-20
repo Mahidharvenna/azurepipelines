@@ -83,20 +83,29 @@ in that release:
 ### Optional per-env flags
 
 **`genDataDictionary`** — `gwb.bat genDataDictionary` is disabled in the classic
-builds for every environment except the one that needs the data dictionary. Opt
-in per env; absent means `false`:
+builds almost everywhere. Opt in **per centre**, by listing which ones need it:
 
 ```json
 "UAT11": {
   "branch":   "maintenance/rel-2026.08",
   "products": ["pc", "bc", "cc"],
-  "genDataDictionary": true
+  "genDataDictionary": ["pc", "bc", "cc"]
 }
 ```
 
+| Value | Meaning |
+|---|---|
+| `["pc", "cc"]` | only those centres run it |
+| `true` | every centre in `products` runs it |
+| absent / `false` | no centre runs it |
+
 The step is always present in the build job but carries a runtime condition, so
-it simply shows as **skipped** for every other env. It runs after
-`webResources` and before `warTomcatDBCP`, matching the classic PC build.
+it shows as **skipped** for centres that don't need it — visible in the log,
+rather than silently missing. It runs after `webResources` and before
+`warTomcatDBCP`, matching the classic PC build.
+
+Because it's per centre, moving it to a different env (or narrowing it to one
+product) is a config edit, not a pipeline change.
 
 ### Exceptions
 

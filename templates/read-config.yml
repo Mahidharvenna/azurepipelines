@@ -113,12 +113,18 @@ stages:
 
           $overrides = $envCfg.overrides
 
-          # gwb.bat genDataDictionary is disabled in classic for every env except
-          # the one that needs the data dictionary. Opt in per env with
-          # "genDataDictionary": true. Absent = false.
-          $genDD = $false
-          if ($null -ne $envCfg.genDataDictionary) { $genDD = [bool]$envCfg.genDataDictionary }
-          Write-Host "##vso[task.setvariable variable=genDataDictionary;isOutput=true]$($genDD.ToString().ToLower())"
+          # gwb.bat genDataDictionary is disabled in classic almost everywhere.
+          # Opt in per CENTRE with a list, e.g. "genDataDictionary": ["pc","cc"].
+          # "true" is shorthand for every centre in this release; absent = none.
+          $genDDRaw = $envCfg.genDataDictionary
+          $genDDList = @()
+          if ($null -ne $genDDRaw) {
+            if ($genDDRaw -is [bool]) {
+              if ($genDDRaw) { $genDDList = $products }
+            } else {
+              $genDDList = @($genDDRaw) | ForEach-Object { "$_".Trim().ToLower() }
+            }
+          }
 
           $useConfig = "${{ parameters.useConfigProducts }}".ToLower() -eq 'true'
           $checkbox = @{
@@ -132,11 +138,15 @@ stages:
           Write-Host "Default branch : $defaultBranch"
           Write-Host "In release     : $($products -join ', ')"
           Write-Host "Product source : $(if ($useConfig) { 'config file' } else { 'queue-time checkboxes' })"
-          Write-Host "genDataDict.   : $genDD"
+          Write-Host "genDataDict.   : $(if ($genDDList.Count) { $genDDList -join ', ' } else { 'none' })"
           Write-Host "----------------------------------------------------"
 
           $anyRun = $false
           foreach ($comp in 'pc','bc','cc','cm') {
+
+            # Emitted for every centre so the build job's variable always exists.
+            $dd = $genDDList -contains $comp
+            Write-Host "##vso[task.setvariable variable=gendd_$comp;isOutput=true]$($dd.ToString().ToLower())"
 
             if ($products -notcontains $comp) {
               Write-Host ("{0,-3} : not in this release -- skipping" -f $comp.ToUpper())
@@ -155,6 +165,7 @@ stages:
             $run = if ($useConfig) { $true } else { $checkbox[$comp] }
             if ($run) { $anyRun = $true }
 
+            if ($dd) { $note += '  [genDataDictionary]' }
             Write-Host ("{0,-3} : {1} -> run={2}{3}" -f $comp.ToUpper(), $branch, $run, $note)
             Write-Host "##vso[task.setvariable variable=branch_$comp;isOutput=true]$branch"
             Write-Host "##vso[task.setvariable variable=run_$comp;isOutput=true]$($run.ToString().ToLower())"
