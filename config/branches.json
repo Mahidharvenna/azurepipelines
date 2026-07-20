@@ -68,6 +68,11 @@
     "branch": "feature/example-migration",
     "products": ["pc", "bc"]
   },
+  "UAT11": {
+    "branch": "maintenance/rel-2026.08",
+    "products": ["pc", "bc", "cc"],
+    "genDataDictionary": true
+  },
   "UAT3": {
     "branch": "releases/rel-2026.04",
     "products": ["pc", "bc", "cc"]

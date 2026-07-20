@@ -87,6 +87,7 @@ stages:
       poolName: ${{ parameters.poolName }}
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_pc'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_pc'], 'true'))
+      genDataDictionaryExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.genDataDictionary'] ]
       cleanSources: true          # classic PC build cleans sources; BC/CC/CM do not
   - template: gw-build.yml
     parameters:
@@ -95,6 +96,7 @@ stages:
       poolName: ${{ parameters.poolName }}
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_bc'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_bc'], 'true'))
+      genDataDictionaryExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.genDataDictionary'] ]
   - template: gw-build.yml
     parameters:
       comp: cc
@@ -102,6 +104,7 @@ stages:
       poolName: ${{ parameters.poolName }}
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cc'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cc'], 'true'))
+      genDataDictionaryExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.genDataDictionary'] ]
   - template: gw-build.yml
     parameters:
       comp: cm
@@ -109,6 +112,7 @@ stages:
       poolName: ${{ parameters.poolName }}
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cm'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cm'], 'true'))
+      genDataDictionaryExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.genDataDictionary'] ]
 
 # --------------------------------------------------------------------------
 # STAGE 3 : DEPLOY to <TIER><INSTANCE>

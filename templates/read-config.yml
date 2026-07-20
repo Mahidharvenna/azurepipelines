@@ -112,6 +112,14 @@ stages:
           }
 
           $overrides = $envCfg.overrides
+
+          # gwb.bat genDataDictionary is disabled in classic for every env except
+          # the one that needs the data dictionary. Opt in per env with
+          # "genDataDictionary": true. Absent = false.
+          $genDD = $false
+          if ($null -ne $envCfg.genDataDictionary) { $genDD = [bool]$envCfg.genDataDictionary }
+          Write-Host "##vso[task.setvariable variable=genDataDictionary;isOutput=true]$($genDD.ToString().ToLower())"
+
           $useConfig = "${{ parameters.useConfigProducts }}".ToLower() -eq 'true'
           $checkbox = @{
             pc = "${{ parameters.deployPC }}".ToLower() -eq 'true'
@@ -124,6 +132,7 @@ stages:
           Write-Host "Default branch : $defaultBranch"
           Write-Host "In release     : $($products -join ', ')"
           Write-Host "Product source : $(if ($useConfig) { 'config file' } else { 'queue-time checkboxes' })"
+          Write-Host "genDataDict.   : $genDD"
           Write-Host "----------------------------------------------------"
 
           $anyRun = $false

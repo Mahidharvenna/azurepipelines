@@ -80,6 +80,24 @@ in that release:
 - The **env label** is `<TIER><INSTANCE>` uppercased — `DEV2`, `QA7`, `UAT1` —
   built from the pipeline's tier plus the instance chosen at queue time.
 
+### Optional per-env flags
+
+**`genDataDictionary`** — `gwb.bat genDataDictionary` is disabled in the classic
+builds for every environment except the one that needs the data dictionary. Opt
+in per env; absent means `false`:
+
+```json
+"UAT11": {
+  "branch":   "maintenance/rel-2026.08",
+  "products": ["pc", "bc", "cc"],
+  "genDataDictionary": true
+}
+```
+
+The step is always present in the build job but carries a runtime condition, so
+it simply shows as **skipped** for every other env. It runs after
+`webResources` and before `warTomcatDBCP`, matching the classic PC build.
+
 ### Exceptions
 
 When one centre is off on its own branch, add an `overrides` block. Everything
