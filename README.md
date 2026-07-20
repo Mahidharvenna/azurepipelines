@@ -1,319 +1,221 @@
 # Config-Driven Azure DevOps Pipelines for Guidewire
 
-Unified **build + deploy** pipelines for multi-product Guidewire InsuranceSuite
+Unified **build + deploy** for multi-product Guidewire InsuranceSuite
 (PolicyCenter, BillingCenter, ClaimCenter, ContactManager), replacing a fleet of
 classic Build pipelines and Release pipelines with **three wrapper pipelines**
 (Dev / QA / UAT) driven by a single config file.
 
 **The release branch is never typed at queue time.** It lives in
-`config/branches.json`, keyed by environment. Change the branch once, every
-pipeline picks it up.
+`config/branches.json`, keyed by environment. Change it once, every pipeline
+picks it up.
+
+---
 
 ## Layout
 
 ```
-.
-├── config/
-│   └── branches.json            # env -> product -> release branch  (source of truth)
-├── pipelines/
-│   ├── release-dev.yaml         # wrapper: DEV  (+ schedule)
-│   ├── release-qa.yaml          # wrapper: QA   (+ schedule)
-│   └── release-uat.yaml         # wrapper: UAT  (+ schedule)
-├── templates/
-│   ├── read-config.yml          # resolves branch + product set at run time
-│   ├── tier-orchestrator.yml    # shared body: resources, stages, fan-out
-│   ├── gw-build.yml             # per-product build (gwb.bat clean/webResources/warTomcatDBCP)
-│   └── gw-deploy.yml            # per-product deploy (15-task SSH sequence)
-└── reports/                     # (separate) monthly login report -> Excel -> email
+config/
+  branches.json            # env -> branch + products  (source of truth)
+pipelines/
+  release-dev.yaml         # wrapper: DEV  (+ schedule)
+  release-qa.yaml          # wrapper: QA   (+ schedule)
+  release-uat.yaml         # wrapper: UAT  (+ schedule)
+templates/
+  read-config.yml          # resolves branch + product set at run time
+  tier-orchestrator.yml    # shared body: resources, variables, stages
+  gw-build.yml             # per-product build (gwb.bat clean/webResources/warTomcatDBCP)
+  gw-deploy.yml            # per-product deploy (15-task SSH sequence)
+reports/                   # unrelated: monthly login report -> Excel -> email
 ```
 
-## How it works
+## How a run works
 
 ```
         queue OR schedule
-                │
-                ▼
-┌─ Stage 1: ReadConfig ───────────────────────────────────┐
-│  reads config/branches.json for this env label          │
-│  emits  branch_pc / branch_bc / branch_cc / branch_cm   │
-│  emits  run_pc    / run_bc    / run_cc    / run_cm      │
-│  fails fast if the env is missing or nothing would run  │
-└──────────────────────────┬───────────────────────────────┘
-                           ▼
-┌─ Stage 2: Build ────────────────────────────────────────┐
-│  4 jobs defined; each runs only if run_<comp> = true    │
-│  each checks out its own configured branch              │
-│  publishes <comp>-drop artifact                         │
-└──────────────────────────┬───────────────────────────────┘
-                           ▼
-┌─ Stage 3: Deploy to <TIER><INSTANCE> ───────────────────┐
-│  4 deployment jobs bound to the ADO Environment         │
-│  each runs only if run_<comp> = true                    │
-│  15-task SSH sequence + Dashboard-DB bookkeeping        │
-└──────────────────────────────────────────────────────────┘
+                |
+                v
+  Stage 1  ReadConfig
+           reads config/branches.json for this env label
+           emits branch_<comp> and run_<comp> per centre
+           fails fast on a missing env or an empty product set
+                |
+                v
+  Stage 2  Build            (4 jobs; each runs only if run_<comp> = true)
+           checkout -> switch to configured branch -> gwb.bat -> publish <comp>-drop
+                |
+                v
+  Stage 3  Deploy           (4 deployment jobs, bound to the ADO Environment)
+           download artifact -> verify WAR -> 15-task SSH sequence
 ```
 
 ## The config file
 
-All four centres normally sit on the **same** branch for a given release, so
-`config/branches.json` records **one branch per env** plus the list of products
-in that release:
+All centres normally share one branch per release, so each env records **one
+branch** plus the centres in that release:
 
 ```json
-{
-  "QA7": {
-    "branch":   "maintenance/rel-2026.08",
-    "products": ["pc", "bc", "cc"]
-  },
-  "UAT1": {
-    "branch":   "maintenance/rel-2026.06",
-    "products": ["pc", "bc", "cc"]
-  }
+"DEV2": {
+  "branch":   "maintenance/rel-2026.06",
+  "products": ["pc", "bc", "cc"]
 }
 ```
 
-- **`branch`** — applies to every product listed. Change it in one place when
-  the release rolls; all centres follow.
-- **`products`** — which centres are in this release. A product not listed
-  never builds or deploys for that env (the equivalent of `NA` in a release
-  matrix). CM is usually omitted.
-- The **env label** is `<TIER><INSTANCE>` uppercased — `DEV2`, `QA7`, `UAT1` —
-  built from the pipeline's tier plus the instance chosen at queue time.
-- **Unnumbered environments are supported**: leave the instance blank and the
-  label is just the tier (`UAT`), giving ADO environment `uat`, SSH connection
-  `UAT-PC`, and `StageName` `PC-UAT`. Real estates often mix both — several
-  numbered DEV/QA instances alongside a single unnumbered UAT.
+- **`branch`** applies to every listed centre.
+- **`products`** — a centre not listed never builds or deploys for that env.
+- The **env label** is `<TIER><INSTANCE>` uppercased: `DEV1`, `QA2`, `UAT1`.
 
-### Optional per-env flags
+### Optional per-env keys
 
-**`genDataDictionary`** — `gwb.bat genDataDictionary` is disabled in the classic
-builds almost everywhere. It is an **environment-level** switch: turn it on for
-an env and every centre in that release generates the data dictionary. Absent
-means off.
-
-```json
-"UAT3": {
-  "branch":   "releases/rel-2026.04",
-  "products": ["pc", "bc", "cc"],
-  "genDataDictionary": true
-}
-```
-
-The step is always present in the build job but carries a runtime condition, so
-it shows as **skipped** on every other env — visible in the log rather than
-silently missing. It runs after `webResources` and before `warTomcatDBCP`,
-matching the classic PC build.
-
-Moving it to a different env is a config edit, not a pipeline change.
-
-> Expect a materially longer build where this is on — dictionary generation runs
-> for several minutes per centre.
-
-### Exceptions
-
-When one centre is off on its own branch, add an `overrides` block. Everything
-else still follows `branch`:
-
-```json
-"DEV4": {
-  "branch":    "feature/example-migration",
-  "products":  ["pc", "bc"],
-  "overrides": { "bc": "feature/example-org-merge" }
-}
-```
-
-The **ReadConfig** log prints the resolved branch per product and marks any
-override, so a run always shows exactly what it used.
-
-### Keeping it in sync with a release matrix
-
-If you track releases in a spreadsheet (release → branch per product → list of
-target envs), note that this file is the **transpose**: it records the *current*
-branch per env, not release history. One env appearing in several releases
-collapses to a single entry here — whichever release it is on now.
+| Key | Effect |
+|---|---|
+| `overrides` | `{"bc": "feature/x"}` — one centre on a different branch |
+| `genDataDictionary` | `true` — run `gwb.bat genDataDictionary` for this env (adds several minutes per centre) |
+| `schedule.enabled` | `false` — a scheduled run stands down; **manual runs still work** |
+| `schedule.cron` / `.note` | documentation only — see below |
 
 ## Manual vs scheduled runs
 
 Each wrapper exposes `useConfigProducts`:
 
-| | `useConfigProducts` | Result |
+| | Setting | Result |
 |---|---|---|
-| **Scheduled run** | `true` (the default) | Deploys every product the config lists for that env. No human input needed. |
-| **Manual, full env** | leave ticked | Same as above — pick the instance and go. |
-| **Manual, one product** | untick it | Only the product checkboxes you tick are built/deployed (still using the config's branch). |
+| Scheduled run | `true` (default) | Deploys whatever the config lists for that env |
+| Manual, whole env | leave ticked | Same — pick the instance and go |
+| Manual, one centre | untick | Only the ticked checkboxes deploy (branch still from config) |
 
-## Scheduling
-
-Scheduling is split across two places, and the split is forced by ADO:
+## Scheduling — and one hard limit
 
 | Piece | Lives in | Why |
 |---|---|---|
-| **When it fires** (`cron`) | the wrapper YAML | `schedules:` is parsed at **compile time**, before any agent runs — it cannot read a repo file |
-| **Whether it runs** (`enabled`) | `config/branches.json` | evaluated at **run time**, so it can come from the config |
+| **When it fires** (`cron`) | the wrapper YAML | `schedules:` is parsed at **compile time** and cannot read a repo file |
+| **Whether it runs** (`enabled`) | `config/branches.json` | evaluated at **run time** |
 
-### Turning a schedule on/off
+So pausing a nightly deploy is a one-line config edit — no pipeline change, no
+UI change, and the pause is visible in git history. **Changing the time is a
+YAML edit.** The `cron` value in config is a human-readable record that must
+mirror the wrapper; changing it alone does nothing.
 
-Add a `schedule` block to any env:
+A scheduled run uses **parameter defaults**, which is why `useConfigProducts`
+defaults to `true` and `envInstance` has a default. One wrapper can therefore
+auto-schedule only its default instance — to schedule a second one, copy the
+wrapper and change the default `envInstance` and cron.
 
-```json
-"QA12": {
-  "branch":   "maintenance/rel-2026.06_hf",
-  "products": ["pc"],
-  "schedule": {
-    "enabled": false,
-    "cron":    "0 8 * * 2,4",
-    "note":    "paused during hotfix testing"
-  }
-}
-```
-
-With `enabled: false`, a **scheduled** run starts, logs why it is standing down,
-and exits without building or deploying anything:
-
-```
-Scheduled run for 'QA12' is DISABLED in config/branches.json.
-Nothing will be built or deployed. Flip schedule.enabled to true to resume.
-```
-
-**Manual runs ignore the toggle** — you can always deploy on demand while the
-schedule is paused. An env with no `schedule` block behaves as enabled.
-
-So pausing a nightly deploy is a one-line config edit: no pipeline YAML change,
-no ADO UI change, and the pause is visible in git history.
-
-### The `cron` field is a record, not the trigger
-
-The `cron` and `note` values are documentation — they let you see the intended
-cadence next to the branch. **The wrapper's `schedules:` block is authoritative**
-and must mirror them. Changing `cron` in the config alone changes nothing.
-
-If that duplication becomes a problem, the fix is a small generator script that
-rewrites each wrapper's `schedules:` block from the config and is run on commit.
-Worth it above roughly 20–30 schedules; below that, mirroring two lines is
-cheaper than owning a generator.
-
-Also, a scheduled run uses **parameter defaults**. That is why
-`useConfigProducts` defaults to `true` and `envInstance` has a default — without
-them a scheduled run would deploy nothing.
-
-**To schedule a second instance of the same tier on its own cadence**, copy the
-wrapper and change the default `envInstance` and the cron:
-
-```yaml
-# pipelines/release-qa7-nightly.yaml
-schedules:
-- cron: '0 4 * * 1-5'
-  displayName: 'QA7 nightly'
-  branches: { include: [master] }
-  always: false
-parameters:
-- name: envInstance
-  type: string
-  default: '7'          # <-- the only real change
-# ... rest identical, extends the same orchestrator
-```
-
-`always: false` means the run is skipped when nothing has been committed to
-`master` since the last run.
-
-## Scope: lower environments only
-
-These pipelines target **Dev / QA / UAT**, where each environment has exactly
-one host per centre and one SSH connection named `<ENV>-<COMP>` (e.g. `DEV1-PC`).
-
-They are **not** suitable for clustered environments as-is. Production estates
-typically run several nodes per centre (`PROD_CC_IT1`, `IT2`, `IT3`, …), which
-needs a deploy template that fans out over a node list, plus decisions about
-rolling restarts and draining. Extending there is a design exercise, not a
-config change.
-
-## Prerequisites
-
-- Azure DevOps Server 2020+ (or Azure DevOps Services) — multi-stage YAML and
-  Environments required. Tested against ADO Server 2022 RTW, which is why the
-  branch is applied via `git checkout` rather than `ref:` on `checkout:`.
-- Self-hosted Windows build agent with the Guidewire build tool (`gwb.bat`),
-  network access to the deployment-tracking SQL Server, and SSH to the target
-  Linux Tomcat hosts.
-- One Git repo per product (PC, BC, CC, CM).
+---
 
 ## Setup
 
-### 1. Adapt the placeholders
+### 1. Replace the placeholders
 
 | Placeholder | Replace with |
 |---|---|
-| `MyOrg` (build-number prefix, REST project name) | Your org / project name |
-| `PC`, `BC`, `CC`, `CM` (repo names in `tier-orchestrator.yml`) | Your repo names |
-| `https://your-ado-host.example.com/your-collection` | Your ADO Server URL |
-| `C:\path\to\gw-core` | On-agent path to your Guidewire core install |
-| `'deployment-secrets'` | Your variable group name |
-| `@example.com` / `@internal.example.com` | Your prod / non-prod mail domains |
-| `dbo.ReleaseNotesLog`, `dbo.CurrentBuild`, `dbo.ReleaseNotes` | Your SQL schema |
-| `/opt/tomcat/apache-tomcat`, `/opt/tomcat-cm/apache-tomcat` | Your Tomcat paths |
-| `config/branches.json` contents | Your real envs and branches |
+| `MyOrg` (build-number prefix, REST project name in `gw-deploy.yml`) | your project name |
+| `PC` / `BC` / `CC` / `CM` in `tier-orchestrator.yml` | your repo names |
+| `https://your-ado-host.example.com/your-collection` | your ADO Server URL |
+| `C:\path\to\gw-core` | on-agent path to your Guidewire core install |
+| `'deployment-secrets'` | your variable group name |
+| `@example.com` / `@internal.example.com` | your prod / non-prod mail domains |
+| `dbo.ReleaseNotesLog` / `dbo.CurrentBuild` / `dbo.ReleaseNotes` | your schema |
+| `catalinaBase*` values | your Tomcat paths — **verify, see below** |
+| `config/branches.json` | your real envs and branches |
 
-### 2. Create one ADO Environment per (tier, instance)
+### 2. Verify the Tomcat paths — do not assume
 
-Pipelines → Environments → New: `dev1`, `dev2`, `qa7`, `uat1`, ... (lowercase —
-must match the `envLabel` the orchestrator computes). Add approvals per policy.
+Tomcat installs are commonly **not** uniform across centres:
 
-### 3. Create one SSH service connection per (instance, product)
-
-Named `<TIER><INSTANCE>-<COMP>` — e.g. `DEV1-PC`, `QA7-BC`, `UAT1-CM`.
-
-### 4. Create the variable group
-
-Library → New variable group → `deployment-secrets`:
-
-| Variable | Notes |
-|---|---|
-| `DBINSTANCE` / `DBNAME` / `DBUSER` / `DBPASS` | Deployment-tracking DB (DBPASS secret) |
-| `pc_userpass` / `bc_userpass` / `cc_userpass` / `ab_userpass` | GWR runtime passwords (secret) |
-
-### 5. Register the three pipelines
-
-For each of `pipelines/release-dev.yaml`, `release-qa.yaml`, `release-uat.yaml`:
-New pipeline → Existing YAML file → pick the file → branch `master` → Save.
-
-### 6. First run
-
-Run `release-dev.yaml`, instance `1`, leave `useConfigProducts` ticked. The first
-run pauses to authorize each repo resource, SSH connection, variable group, and
-the Environment — permit each and it resumes. Check the **ReadConfig** log first:
-it prints exactly which branch and which products it resolved.
-
-## Per-centre quirks (handled)
-
-### Tomcat installs are not uniform
-
-Each centre deploys to its own host, and the Tomcat path differs by product:
-
-| Centre | `CATALINA_BASE` |
+| Centre | Typical `CATALINA_BASE` |
 |---|---|
 | PC | `/opt/tomcat/apache-tomcat` |
 | BC | `/opt/tomcat/apache-tomcat` |
 | CC | `/opt/tomcat-cc/apache-tomcat` |
 | CM | `/opt/tomcat-cm/apache-tomcat` |
 
-These are set as four explicit variables in `tier-orchestrator.yml`. **Verify
-yours before first deploy** — the classic release log's *"Copy Latest war file
-to Server"* step prints the exact target path, which is the most reliable
-source:
+Confirm each from a classic release log — the *"Copy Latest war file to Server"*
+step prints the exact target it copied to:
 
 ```
 Copying file ...\drop\dist\wars\TomcatDbcp\cc.war
 to /opt/tomcat-cc/apache-tomcat/webapps/cc.war on remote machine.
 ```
 
-A wrong value doesn't fail fast — the deploy will shut down, unpack and restart
+A wrong value does not fail fast — the deploy shuts down, unpacks and restarts
 against whatever path you gave it.
 
-### ContactManager
+### 3. ADO prerequisites
+
+- **Environments** — one per `<tier><instance>`, lowercase: `dev1`, `qa7`, `uat1`
+- **SSH service connections** — named `<TIER><INSTANCE>-<COMP>`: `DEV1-PC`, `UAT1-CC`
+- **Variable group** — `DBINSTANCE`, `DBNAME`, `DBUSER`, `DBPASS`, plus
+  `pc_userpass`, `bc_userpass`, `cc_userpass`, `ab_userpass` (secrets). Grant the
+  pipelines access under **Pipeline permissions**.
+
+### 4. Register the pipelines
+
+For each wrapper: New pipeline → Existing YAML file → pick the file → `master`.
+
+---
+
+## First run: prove one environment before widening
+
+Do **not** start with all four centres and a schedule. The recommended order:
+
+1. Config lists **one env, one centre** (`"DEV1": {"branch": "...", "products": ["pc"]}`)
+   with `schedule.enabled: false`
+2. Run `release-dev` manually, instance `1`, `useConfigProducts` ticked
+3. Authorise each resource when prompted (first run only)
+4. **Read the ReadConfig log before anything builds** — it prints exactly what
+   it resolved:
+   ```
+   Env            : DEV1
+   Default branch : maintenance/rel-2026.06
+   In release     : pc
+   Product source : config file
+   PC  : maintenance/rel-2026.06 -> run=True
+   BC  : not in this release -- skipping
+   ```
+5. Check **"Show staged artifact layout"** in the build — confirm the WAR is at
+   `dist/wars/TomcatDbcp/<comp>.war` and not nested deeper
+6. Confirm the app actually starts — a green pipeline is not proof
+7. Only then add centres, then envs, then turn schedules on
+
+### Why step 5 matters
+
+`CopyFiles@2` preserves paths relative to its `SourceFolder`. A multi-repo
+checkout can nest sources one level deeper, which shifts the WAR's path *inside
+the artifact*. The deploy globs for it rather than assuming a fixed path, and
+`failOnEmptySource: true` makes a mismatch fail loudly — because the failure
+mode otherwise is nasty: the copy silently does nothing, the following steps
+still delete the webapp and unzip a WAR that was never delivered, and you find
+out at startup as a `NoClassDefFoundError` deep in OSGi.
+
+---
+
+## Scope: lower environments only
+
+These pipelines target **Dev / QA / UAT**, where each environment has one host
+per centre and one SSH connection named `<ENV>-<COMP>`.
+
+They are **not** suitable for clustered environments as-is. Production estates
+typically run several nodes per centre (`PROD_CC_IT1`, `IT2`, `IT3`, …), needing
+a deploy template that fans out over a node list plus decisions about rolling
+restarts and draining. Check whether any *lower* environment is also clustered —
+if an env has connections like `UAT1-PCi1`, `UAT1-PCe1` alongside `UAT1-PC`,
+deploying to only the plain one leaves the other nodes on the old WAR.
+
+## ContactManager
 
 - `COMP` is passed as `ab` (not `cm`) to match legacy task-group case statements
-- Artifact stays `cm-drop` (built from the CM repo)
+- Artifact stays `cm-drop`, built from the CM repo
 - Often omitted from `products` — CM deploys far less often than the rest
+
+## Platform notes
+
+Tested against **Azure DevOps Server 2022 RTW**, which drives several choices:
+
+- `ref:` is not supported on `checkout:` → the branch is applied by a runtime
+  `git fetch` + `git checkout`, which is *why* config-driven branches work
+- template expressions are not allowed in `resources.repositories[].ref`
+- `PublishPipelineArtifact@1` is unavailable → `PublishBuildArtifacts@1`
+- `DownloadBuildArtifacts@1` is unavailable → `@0`
 
 ## License
 

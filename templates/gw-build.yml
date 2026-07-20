@@ -112,6 +112,29 @@ jobs:
       Contents: '**/*.war'
       TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
+  # Print the staged layout. CopyFiles preserves paths relative to SourceFolder,
+  # so if a multi-repo checkout nests the sources the WAR lands one level deeper
+  # inside the artifact. The deploy globs for it, but this makes the layout
+  # visible in the log instead of something you discover at startup.
+  - task: PowerShell@2
+    displayName: 'Show staged artifact layout'
+    condition: succeededOrFailed()
+    inputs:
+      targetType: inline
+      script: |
+        $stage = "$(Build.ArtifactStagingDirectory)"
+        Write-Host "Sources dir : $(Build.SourcesDirectory)"
+        Write-Host "Repo path   : $(Build.Repository.LocalPath)"
+        Write-Host "Staging dir : $stage"
+        $wars = Get-ChildItem -Path $stage -Filter '*.war' -Recurse -ErrorAction SilentlyContinue
+        if (-not $wars) {
+          Write-Host "##vso[task.logissue type=warning]No .war staged -- the build likely failed before producing one."
+        } else {
+          foreach ($w in $wars) {
+            Write-Host ("  {0}  ({1:N0} bytes)" -f $w.FullName.Replace($stage,'').TrimStart('\','/'), $w.Length)
+          }
+        }
+
   # NOTE: PublishPipelineArtifact@1 is NOT supported on ADO Server (on-prem).
   # Using the older PublishBuildArtifacts@1 task instead -- same outcome.
   - task: PublishBuildArtifacts@1

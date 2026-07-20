@@ -1,129 +1,45 @@
 {
   "DEV1": {
     "branch": "maintenance/rel-2026.06",
-    "products": [
-      "pc",
-      "bc",
-      "cc",
-      "cm"
-    ],
+    "products": ["pc"],
     "schedule": {
-      "enabled": true,
+      "enabled": false,
       "cron": "0 6 * * 1-5",
-      "note": "06:00 UTC weeknights - mirrored in pipelines/release-dev.yaml"
+      "note": "off until the first manual run is proven -- cron mirrored in pipelines/release-dev.yaml"
     }
   },
   "DEV2": {
-    "branch": "releases/rel-2026.04",
-    "products": [
-      "pc",
-      "bc",
-      "cc"
-    ]
+    "branch": "maintenance/rel-2026.06",
+    "products": ["pc", "bc", "cc"]
   },
   "DEV3": {
     "branch": "maintenance/rel-2026.06",
-    "products": [
-      "cc",
-      "cm"
-    ]
+    "products": ["cc", "cm"]
   },
   "DEV4": {
     "branch": "feature/example-migration",
-    "products": [
-      "pc",
-      "bc"
-    ],
+    "products": ["pc", "bc"],
     "overrides": {
       "bc": "feature/example-org-merge"
     }
   },
+
   "QA1": {
     "branch": "maintenance/rel-2026.06",
-    "products": [
-      "pc",
-      "bc",
-      "cc"
-    ],
-    "schedule": {
-      "enabled": true,
-      "cron": "0 8 * * 2,4",
-      "note": "08:00 UTC Tue/Thu - mirrored in pipelines/release-qa.yaml"
-    }
+    "products": ["pc", "bc", "cc"]
   },
   "QA2": {
     "branch": "maintenance/rel-2026.06",
-    "products": [
-      "pc"
-    ]
+    "products": ["pc"]
   },
-  "QA7": {
-    "branch": "maintenance/rel-2026.08",
-    "products": [
-      "pc",
-      "bc",
-      "cc"
-    ]
-  },
-  "QA8": {
-    "branch": "maintenance/rel-2026.08",
-    "products": [
-      "pc",
-      "bc",
-      "cc"
-    ]
-  },
-  "QA12": {
-    "branch": "maintenance/rel-2026.06_hf",
-    "products": [
-      "pc"
-    ],
-    "schedule": {
-      "enabled": false,
-      "cron": "0 8 * * 2,4",
-      "note": "paused during hotfix testing - flip enabled back to true to resume"
-    }
-  },
-  "UAT": {
-    "branch": "maintenance/rel-2026.06",
-    "products": [
-      "pc",
-      "bc",
-      "cc"
-    ],
-    "schedule": {
-      "enabled": true,
-      "cron": "0 6 * * 6",
-      "note": "06:00 UTC Saturday - mirrored in pipelines/release-uat.yaml"
-    }
-  },
+
   "UAT1": {
     "branch": "maintenance/rel-2026.06",
-    "products": [
-      "pc",
-      "bc",
-      "cc"
-    ],
-    "schedule": {
-      "enabled": true,
-      "cron": "0 6 * * 6",
-      "note": "06:00 UTC Saturday - mirrored in pipelines/release-uat.yaml"
-    }
+    "products": ["pc", "bc", "cc"]
   },
   "UAT2": {
-    "branch": "feature/example-migration",
-    "products": [
-      "pc",
-      "bc"
-    ]
-  },
-  "UAT3": {
     "branch": "releases/rel-2026.04",
-    "products": [
-      "pc",
-      "bc",
-      "cc"
-    ],
+    "products": ["pc", "bc", "cc"],
     "genDataDictionary": true
   }
 }

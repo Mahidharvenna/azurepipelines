@@ -19,9 +19,11 @@ pr: none
 
 parameters:
 - name: envInstance
-  displayName: 'UAT instance (blank = the unnumbered UAT environment)'
+  displayName: 'UAT instance'
   type: string
-  default: ''
+  default: '1'
+  # Blank is allowed for estates that have an unnumbered environment; only
+  # use it if a matching <TIER>-<COMP> service connection actually exists.
   values: ['', '1', '2', '3', '4']
 
 - name: useConfigProducts

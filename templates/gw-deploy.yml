@@ -5,7 +5,7 @@
 #
 # The release branch arrives as a runtime expression (branchExpr) resolved by
 # the ReadConfig stage; it is surfaced as the runtime variable releaseBranch
-# and used in the Dashboard-DB bookkeeping below.
+# and used in the tracking-DB bookkeeping below.
 # =============================================================================
 
 parameters:
@@ -15,7 +15,7 @@ parameters:
   type: string
 - name: envLabel                # full env label (e.g. dev1, qa2) -- maps to ADO Environment
   type: string
-- name: envName                 # stage label for Dashboard rows: PC-DEV1, BC-DEV1, ...
+- name: envName                 # stage label for tracking rows: PC-DEV1, BC-DEV1, ...
   type: string
 - name: sshConnection           # ADO SSH service-connection name (e.g. DEV1-PC)
   type: string
@@ -57,7 +57,26 @@ jobs:
             artifactName: '${{ parameters.artifactName }}'
             downloadPath: '$(Pipeline.Workspace)'
 
-        # --- 1. Pre-deployment: insert "Started" row in Dashboard DB ---
+        # Fail here -- before anything on the server is touched -- if the WAR
+        # is not where we expect. Cheap insurance against a half-applied deploy.
+        - task: PowerShell@2
+          displayName: 'Verify WAR present in artifact'
+          inputs:
+            targetType: inline
+            errorActionPreference: stop
+            script: |
+              $root = "$(Pipeline.Workspace)/${{ parameters.artifactName }}"
+              Write-Host "Artifact root: $root"
+              $wars = Get-ChildItem -Path $root -Filter '*.war' -Recurse -ErrorAction SilentlyContinue
+              if (-not $wars) {
+                Write-Error "No .war found under $root. The build published an unexpected layout -- check the build's 'Copy WAR files to staging' step."
+                exit 1
+              }
+              foreach ($w in $wars) {
+                Write-Host ("  {0}  ({1:N0} bytes)" -f $w.FullName.Replace($root,'').TrimStart('\','/'), $w.Length)
+              }
+
+        # --- 1. Pre-deployment: insert "Started" row in the tracking DB ---
         - task: PowerShell@2
           displayName: 'Pre-Deployment - Update deployment-tracking DB'
           inputs:
@@ -176,19 +195,28 @@ jobs:
             readyTimeout: '20000'
 
         # --- 7. Copy new WAR to server ---
+        # The glob is deliberately anchored at the artifact ROOT, not at a
+        # hardcoded dist/wars/TomcatDbcp path: a multi-repo checkout can nest
+        # the sources one level deeper, which shifts the path inside the
+        # artifact. flattenFolders drops the WAR straight into webapps/.
+        #
+        # failOnEmptySource MUST stay true. With it false, a path mismatch
+        # copies nothing, the task still goes green, and the steps below then
+        # delete the webapp and unzip a WAR that was never delivered -- which
+        # surfaces much later as OSGi/NoClassDefFoundError at startup.
         - task: CopyFilesOverSSH@0
           displayName: 'Copy Latest war file to Server'
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
-            sourceFolder: '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dist/wars/TomcatDbcp/'
-            contents: '**/*.war'
+            sourceFolder: '$(Pipeline.Workspace)/${{ parameters.artifactName }}'
+            contents: '**/dist/wars/TomcatDbcp/${{ parameters.comp }}.war'
             targetFolder: '${{ parameters.catalinaBase }}/webapps'
             isWindowsOnTarget: false
             overwrite: true
             cleanTargetFolder: false
             cleanHiddenFilesInTarget: false
-            failOnEmptySource: false
-            flattenFolders: false
+            failOnEmptySource: true
+            flattenFolders: true
             readyTimeout: '20000'
 
         # --- 8. Remove old extracted webapp dir ---
@@ -288,7 +316,7 @@ jobs:
               tail -500 $CATALINA_OUT
             readyTimeout: '20000'
 
-        # --- 15. Post-deployment: write commits + final status to Dashboard DB ---
+        # --- 15. Post-deployment: write commits + final status to the tracking DB ---
         - task: PowerShell@2
           displayName: 'Post-Deployment - Update deployment-tracking DB'
           condition: always()
