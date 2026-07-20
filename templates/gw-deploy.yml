@@ -204,6 +204,11 @@ jobs:
         # copies nothing, the task still goes green, and the steps below then
         # delete the webapp and unzip a WAR that was never delivered -- which
         # surfaces much later as OSGi/NoClassDefFoundError at startup.
+        #
+        # The filename is <comp>.war, i.e. the DEPLOY comp. For ContactManager
+        # that is 'ab.war' (legacy AddressBook name) even though the artifact is
+        # 'cm-drop' built from the CM repo. If your CM build emits 'cm.war'
+        # instead, this fails loudly here rather than half-deploying.
         - task: CopyFilesOverSSH@0
           displayName: 'Copy Latest war file to Server'
           inputs:

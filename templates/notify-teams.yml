@@ -34,16 +34,19 @@ stages:
   - ReadConfig
   - Build
   - Deploy
-  # always() so a FAILED deploy still notifies; the parameter gates it off.
-  condition: and(always(), eq('${{ parameters.notifyTeams }}', 'true'))
+  # always() so a FAILED deploy still notifies; the boolean gates it off.
+  # The parameter substitutes as a literal True/False, which a condition accepts.
+  condition: and(always(), ${{ parameters.notifyTeams }})
   jobs:
   - job: PostToTeams
     displayName: 'Post deployment summary'
     pool:
       name: ${{ parameters.poolName }}
     variables:
-      buildResult:  $[ dependencies.Build.result ]
-      deployResult: $[ dependencies.Deploy.result ]
+      # NOTE: at JOB level, `dependencies` means other jobs in THIS stage.
+      # Referring to another STAGE requires `stageDependencies`.
+      buildResult:  $[ stageDependencies.Build.result ]
+      deployResult: $[ stageDependencies.Deploy.result ]
       branchPc:     $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_pc'] ]
       branchBc:     $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_bc'] ]
       branchCc:     $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cc'] ]
@@ -62,7 +65,7 @@ stages:
         script: |
           $webhook = "$(TEAMS_WEBHOOK)"
           if ([string]::IsNullOrWhiteSpace($webhook) -or $webhook -like '*TEAMS_WEBHOOK*') {
-            Write-Host "##vso[task.logissue type=warning]TEAMS_WEBHOOK is not set -- skipping notification."
+            Write-Host "##vso[task.logissue type=warning]TEAMS_WEBHOOK is not set - skipping notification."
             exit 0
           }
 
@@ -70,56 +73,60 @@ stages:
           $deploy   = "$(deployResult)"
           $build    = "$(buildResult)"
 
-          # Overall status: deploy result dominates, build result is the fallback
-          $status = if ($deploy -eq 'Succeeded') { 'Succeeded' }
-                    elseif ($deploy -eq 'SucceededWithIssues') { 'Succeeded with issues' }
-                    elseif ($deploy -eq 'Skipped' -and $build -ne 'Succeeded') { 'Build failed' }
-                    else { 'Failed' }
+          # Deploy result dominates; build result is the fallback when Deploy
+          # never ran (e.g. the build failed, so Deploy was skipped).
+          if     ($deploy -eq 'Succeeded')           { $status = 'Succeeded' }
+          elseif ($deploy -eq 'SucceededWithIssues') { $status = 'Succeeded with issues' }
+          elseif ($build  -ne 'Succeeded')           { $status = 'Build failed' }
+          else                                       { $status = 'Failed' }
 
-          $colour = switch ($status) {
-            'Succeeded'             { '2EB886' }
-            'Succeeded with issues' { 'DAA038' }
-            default                 { 'D93F3C' }
-          }
+          if ($status -eq 'Succeeded')                   { $colour = '2EB886' }
+          elseif ($status -eq 'Succeeded with issues')   { $colour = 'DAA038' }
+          else                                           { $colour = 'D93F3C' }
 
           # One line per centre that actually ran
           $centres = @()
-          foreach ($c in @(
-            @{ n='PolicyCenter';    run="$(runPc)"; br="$(branchPc)" },
-            @{ n='BillingCenter';   run="$(runBc)"; br="$(branchBc)" },
-            @{ n='ClaimCenter';     run="$(runCc)"; br="$(branchCc)" },
-            @{ n='ContactManager';  run="$(runCm)"; br="$(branchCm)" }
-          )) {
-            if ($c.run -eq 'true') { $centres += ("{0} — `{1}`" -f $c.n, $c.br) }
+          $all = @(
+            @{ n = 'PolicyCenter';   run = "$(runPc)"; br = "$(branchPc)" },
+            @{ n = 'BillingCenter';  run = "$(runBc)"; br = "$(branchBc)" },
+            @{ n = 'ClaimCenter';    run = "$(runCc)"; br = "$(branchCc)" },
+            @{ n = 'ContactManager'; run = "$(runCm)"; br = "$(branchCm)" }
+          )
+          foreach ($c in $all) {
+            if ($c.run -eq 'true') { $centres += ($c.n + ' : ' + $c.br) }
           }
-          $centreText = if ($centres.Count) { $centres -join "`n`n" } else { '_none_' }
+          if ($centres.Count -gt 0) {
+            $centreText = $centres -join "`n`n"
+          } else {
+            $centreText = 'none'
+          }
 
           $runUrl = "$(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
 
           # Legacy MessageCard format -- accepted by both classic Incoming
           # Webhook connectors and Power Automate webhook triggers.
           $payload = @{
-            '@type'      = 'MessageCard'
-            '@context'   = 'https://schema.org/extensions'
-            summary      = "Guidewire deploy to $envLabel : $status"
-            themeColor   = $colour
-            title        = "Guidewire deploy to $envLabel : $status"
-            sections     = @(
+            '@type'    = 'MessageCard'
+            '@context' = 'https://schema.org/extensions'
+            summary    = "Guidewire deploy to $envLabel : $status"
+            themeColor = $colour
+            title      = "Guidewire deploy to $envLabel : $status"
+            sections   = @(
               @{
                 facts = @(
-                  @{ name = 'Environment'; value = $envLabel }
-                  @{ name = 'Run';         value = '$(Build.BuildNumber)' }
-                  @{ name = 'Triggered by';value = '$(Build.RequestedFor)' }
-                  @{ name = 'Reason';      value = '$(Build.Reason)' }
+                  @{ name = 'Environment';  value = $envLabel }
+                  @{ name = 'Run';          value = '$(Build.BuildNumber)' }
+                  @{ name = 'Triggered by'; value = '$(Build.RequestedFor)' }
+                  @{ name = 'Reason';       value = '$(Build.Reason)' }
                 )
                 text = "**Centres deployed**`n`n$centreText"
               }
             )
             potentialAction = @(
               @{
-                '@type'  = 'OpenUri'
-                name     = 'View pipeline run'
-                targets  = @(@{ os = 'default'; uri = $runUrl })
+                '@type' = 'OpenUri'
+                name    = 'View pipeline run'
+                targets = @(@{ os = 'default'; uri = $runUrl })
               }
             )
           } | ConvertTo-Json -Depth 10
