@@ -135,7 +135,7 @@ jobs:
             sshEndpoint: ${{ parameters.sshConnection }}
             runOptions: inline
             interpreterCommand: '/bin/bash'
-            inline: '${{ parameters.catalinaBase }}/bin/forceShutDown.sh'
+            inline: 'sh ${{ parameters.catalinaBase }}/bin/forceShutDown.sh'
             failOnStdErr: false
             readyTimeout: '20000'
 
@@ -310,9 +310,11 @@ jobs:
             interpreterCommand: '/bin/bash'
             inline: |
               LOG4J=${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}/modules/configuration/config/logging/log4j2.xml
-              cat $LOG4J | grep 'guidewire.logDirectory' || true
-              sed -i 's|/env/|/${{ parameters.env }}/|g' $LOG4J
-              cat $LOG4J | grep 'guidewire.logDirectory' || true
+              # Classic behaviour: replace 'env' with the tier ONLY on the
+              # guidewire.logDirectory line (line-addressed sed), then echo that
+              # line to confirm. A whole-file sed would risk touching other paths.
+              sed -i '/<Property name="guidewire.logDirectory">/s/env/${{ parameters.env }}/g' $LOG4J
+              cat $LOG4J | grep -e '<Property name="guidewire.logDirectory"' || true
             readyTimeout: '20000'
 
         # --- 13. Start Guidewire ---
@@ -322,7 +324,7 @@ jobs:
             sshEndpoint: ${{ parameters.sshConnection }}
             runOptions: inline
             interpreterCommand: '/bin/bash'
-            inline: '${{ parameters.catalinaBase }}/bin/validateStartUp.sh'
+            inline: 'sh ${{ parameters.catalinaBase }}/bin/validateStartUp.sh'
             failOnStdErr: false
             readyTimeout: '20000'
 
