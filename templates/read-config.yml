@@ -120,6 +120,19 @@ stages:
           if ($null -ne $envCfg.genDataDictionary) { $genDD = [bool]$envCfg.genDataDictionary }
           Write-Host "##vso[task.setvariable variable=genDataDictionary;isOutput=true]$($genDD.ToString().ToLower())"
 
+          # Teams notification, per env. The config carries whether to notify and
+          # WHICH variable holds the webhook -- never the URL itself, which is a
+          # write credential for that channel and must not live in git.
+          $notify = $envCfg.notify
+          $notifyEnabled = $false
+          $notifyVar = 'TEAMS_WEBHOOK'
+          if ($null -ne $notify) {
+            if ($null -ne $notify.enabled) { $notifyEnabled = [bool]$notify.enabled }
+            if (-not [string]::IsNullOrWhiteSpace($notify.webhookVar)) { $notifyVar = $notify.webhookVar }
+          }
+          Write-Host "##vso[task.setvariable variable=notify_enabled;isOutput=true]$($notifyEnabled.ToString().ToLower())"
+          Write-Host "##vso[task.setvariable variable=notify_webhookvar;isOutput=true]$notifyVar"
+
           $useConfig = "${{ parameters.useConfigProducts }}".ToLower() -eq 'true'
           $checkbox = @{
             pc = "${{ parameters.deployPC }}".ToLower() -eq 'true'
@@ -133,6 +146,7 @@ stages:
           Write-Host "In release     : $($products -join ', ')"
           Write-Host "Product source : $(if ($useConfig) { 'config file' } else { 'queue-time checkboxes' })"
           Write-Host "genDataDict.   : $genDD  (env-level: applies to every centre in this release)"
+          Write-Host "Teams notify   : $notifyEnabled  (webhook from variable '$notifyVar')"
           Write-Host "----------------------------------------------------"
 
           $anyRun = $false

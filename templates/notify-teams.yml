@@ -40,6 +40,9 @@ stages:
   jobs:
   - job: PostToTeams
     displayName: 'Post deployment summary'
+    # Stage gate above is the pipeline-wide switch; this is the per-env switch
+    # from config/branches.json -> notify.enabled.
+    condition: eq(stageDependencies.ReadConfig.Read.outputs['cfg.notify_enabled'], 'true')
     pool:
       name: ${{ parameters.poolName }}
     variables:
@@ -55,19 +58,34 @@ stages:
       runBc:        $[ stageDependencies.ReadConfig.Read.outputs['cfg.run_bc'] ]
       runCc:        $[ stageDependencies.ReadConfig.Read.outputs['cfg.run_cc'] ]
       runCm:        $[ stageDependencies.ReadConfig.Read.outputs['cfg.run_cm'] ]
+      webhookVar:   $[ stageDependencies.ReadConfig.Read.outputs['cfg.notify_webhookvar'] ]
     steps:
     - checkout: none
     - task: PowerShell@2
       displayName: 'Post to Teams channel'
+      # Secrets are NOT auto-mapped into the environment, so every webhook the
+      # config may name has to be declared here. Add a line per channel.
+      # An undeclared/absent variable stays as literal '$(NAME)' and is caught below.
+      env:
+        TEAMS_WEBHOOK:     $(TEAMS_WEBHOOK)
+        TEAMS_WEBHOOK_DEV: $(TEAMS_WEBHOOK_DEV)
+        TEAMS_WEBHOOK_QA:  $(TEAMS_WEBHOOK_QA)
+        TEAMS_WEBHOOK_UAT: $(TEAMS_WEBHOOK_UAT)
       inputs:
         targetType: inline
         errorActionPreference: stop
         script: |
-          $webhook = "$(TEAMS_WEBHOOK)"
-          if ([string]::IsNullOrWhiteSpace($webhook) -or $webhook -like '*TEAMS_WEBHOOK*') {
-            Write-Host "##vso[task.logissue type=warning]TEAMS_WEBHOOK is not set - skipping notification."
+          # Which secret holds the URL comes from config; the URL itself never does.
+          $varName = "$(webhookVar)"
+          if ([string]::IsNullOrWhiteSpace($varName)) { $varName = 'TEAMS_WEBHOOK' }
+          $webhook = [Environment]::GetEnvironmentVariable($varName)
+
+          if ([string]::IsNullOrWhiteSpace($webhook) -or $webhook -like '*$(*') {
+            Write-Host "##vso[task.logissue type=warning]Variable '$varName' holds no webhook URL - skipping notification."
+            Write-Host "Add it to the variable group as a SECRET, and map it in this task's env: block."
             exit 0
           }
+          Write-Host "Using webhook from variable '$varName'"
 
           $envLabel = "${{ parameters.envLabel }}"
           $deploy   = "$(deployResult)"

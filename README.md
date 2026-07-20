@@ -191,27 +191,55 @@ out at startup as a `NoClassDefFoundError` deep in OSGi.
 
 ## Teams notifications
 
-A **Notify** stage posts a deployment summary to a Teams channel. It is
-**off by default** — the stage still appears in every run, marked *skipped*, so
-it is discoverable rather than hidden.
+A **Notify** stage posts a deployment summary to a Teams channel. It is **off by
+default** and gated twice, so turning it on is deliberate:
 
-To enable:
+| Gate | Where | Scope |
+|---|---|---|
+| `notifyTeams` | wrapper parameter | pipeline-wide switch |
+| `notify.enabled` | `config/branches.json` | per environment |
 
-1. Create an incoming webhook on the target channel (channel → **⋯ → Connectors
-   → Incoming Webhook**, or a Power Automate *"When a Teams webhook request is
+```json
+"DEV1": {
+  "branch":   "maintenance/rel-2026.06",
+  "products": ["pc"],
+  "notify": {
+    "enabled":    true,
+    "webhookVar": "TEAMS_WEBHOOK_DEV"
+  }
+}
+```
+
+### The URL never goes in the config
+
+`webhookVar` is the **name of a variable-group secret**, not the URL. A Teams
+webhook URL is a write credential for that channel — anyone holding it can post
+as your pipeline. In a committed file it would live in git history permanently
+and be readable by everyone with repo access.
+
+So: config says *which* secret; the variable group holds the value.
+
+### Enabling
+
+1. Create an incoming webhook on the channel (channel → **⋯ → Connectors →
+   Incoming Webhook**, or a Power Automate *"When a Teams webhook request is
    received"* flow on newer tenants)
-2. Add the URL to the variable group as **`TEAMS_WEBHOOK`**, marked **secret** —
-   a webhook URL is effectively a write credential for that channel
-3. Tick **Post a summary to Teams** on the run, or flip the wrapper's
-   `notifyTeams` default to `true`
+2. Add it to the variable group as e.g. `TEAMS_WEBHOOK_DEV`, marked **secret**
+3. Map it in `notify-teams.yml` under the task's `env:` block — secrets are not
+   auto-mapped into the environment, so each channel needs a line there
+4. Set `notify.enabled: true` for the env, and tick **Post a summary to Teams**
+   (or flip the wrapper's `notifyTeams` default)
+
+Different environments can post to different channels by naming different
+variables. Omit the `notify` block entirely and the env simply never notifies.
 
 The message reports environment, run number, who triggered it, the reason, and
 one line per centre with the branch it deployed — plus a link back to the run.
 It fires on failure too (`always()`), so a broken deploy still notifies.
 
-It posts with plain `Invoke-RestMethod`, so no marketplace extension is needed
-on ADO Server. If `TEAMS_WEBHOOK` is missing the step logs a warning and exits
-cleanly rather than failing the run.
+Posting uses plain `Invoke-RestMethod`, so no marketplace extension is needed on
+ADO Server. A missing or unmapped webhook logs a warning and exits cleanly — a
+notification problem should never fail a successful deploy.
 
 ## Scope: lower environments only
 
