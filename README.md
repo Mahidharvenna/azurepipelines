@@ -83,29 +83,27 @@ in that release:
 ### Optional per-env flags
 
 **`genDataDictionary`** — `gwb.bat genDataDictionary` is disabled in the classic
-builds almost everywhere. Opt in **per centre**, by listing which ones need it:
+builds almost everywhere. It is an **environment-level** switch: turn it on for
+an env and every centre in that release generates the data dictionary. Absent
+means off.
 
 ```json
-"UAT11": {
-  "branch":   "maintenance/rel-2026.08",
+"UAT3": {
+  "branch":   "releases/rel-2026.04",
   "products": ["pc", "bc", "cc"],
-  "genDataDictionary": ["pc", "bc", "cc"]
+  "genDataDictionary": true
 }
 ```
 
-| Value | Meaning |
-|---|---|
-| `["pc", "cc"]` | only those centres run it |
-| `true` | every centre in `products` runs it |
-| absent / `false` | no centre runs it |
-
 The step is always present in the build job but carries a runtime condition, so
-it shows as **skipped** for centres that don't need it — visible in the log,
-rather than silently missing. It runs after `webResources` and before
-`warTomcatDBCP`, matching the classic PC build.
+it shows as **skipped** on every other env — visible in the log rather than
+silently missing. It runs after `webResources` and before `warTomcatDBCP`,
+matching the classic PC build.
 
-Because it's per centre, moving it to a different env (or narrowing it to one
-product) is a config edit, not a pipeline change.
+Moving it to a different env is a config edit, not a pipeline change.
+
+> Expect a materially longer build where this is on — dictionary generation runs
+> for several minutes per centre.
 
 ### Exceptions
 

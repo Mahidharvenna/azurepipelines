@@ -1,7 +1,12 @@
 {
   "DEV1": {
     "branch": "maintenance/rel-2026.06",
-    "products": ["pc", "bc", "cc", "cm"],
+    "products": [
+      "pc",
+      "bc",
+      "cc",
+      "cm"
+    ],
     "schedule": {
       "enabled": true,
       "cron": "0 6 * * 1-5",
@@ -10,23 +15,36 @@
   },
   "DEV2": {
     "branch": "releases/rel-2026.04",
-    "products": ["pc", "bc", "cc"]
+    "products": [
+      "pc",
+      "bc",
+      "cc"
+    ]
   },
   "DEV3": {
     "branch": "maintenance/rel-2026.06",
-    "products": ["cc", "cm"]
+    "products": [
+      "cc",
+      "cm"
+    ]
   },
   "DEV4": {
     "branch": "feature/example-migration",
-    "products": ["pc", "bc"],
+    "products": [
+      "pc",
+      "bc"
+    ],
     "overrides": {
       "bc": "feature/example-org-merge"
     }
   },
-
   "QA1": {
     "branch": "maintenance/rel-2026.06",
-    "products": ["pc", "bc", "cc"],
+    "products": [
+      "pc",
+      "bc",
+      "cc"
+    ],
     "schedule": {
       "enabled": true,
       "cron": "0 8 * * 2,4",
@@ -35,29 +53,44 @@
   },
   "QA2": {
     "branch": "maintenance/rel-2026.06",
-    "products": ["pc"]
+    "products": [
+      "pc"
+    ]
   },
   "QA7": {
     "branch": "maintenance/rel-2026.08",
-    "products": ["pc", "bc", "cc"]
+    "products": [
+      "pc",
+      "bc",
+      "cc"
+    ]
   },
   "QA8": {
     "branch": "maintenance/rel-2026.08",
-    "products": ["pc", "bc", "cc"]
+    "products": [
+      "pc",
+      "bc",
+      "cc"
+    ]
   },
   "QA12": {
     "branch": "maintenance/rel-2026.06_hf",
-    "products": ["pc"],
+    "products": [
+      "pc"
+    ],
     "schedule": {
       "enabled": false,
       "cron": "0 8 * * 2,4",
       "note": "paused during hotfix testing - flip enabled back to true to resume"
     }
   },
-
   "UAT1": {
     "branch": "maintenance/rel-2026.06",
-    "products": ["pc", "bc", "cc"],
+    "products": [
+      "pc",
+      "bc",
+      "cc"
+    ],
     "schedule": {
       "enabled": true,
       "cron": "0 6 * * 6",
@@ -66,15 +99,18 @@
   },
   "UAT2": {
     "branch": "feature/example-migration",
-    "products": ["pc", "bc"]
-  },
-  "UAT11": {
-    "branch": "maintenance/rel-2026.08",
-    "products": ["pc", "bc", "cc"],
-    "genDataDictionary": ["pc", "bc", "cc"]
+    "products": [
+      "pc",
+      "bc"
+    ]
   },
   "UAT3": {
     "branch": "releases/rel-2026.04",
-    "products": ["pc", "bc", "cc"]
+    "products": [
+      "pc",
+      "bc",
+      "cc"
+    ],
+    "genDataDictionary": true
   }
 }
