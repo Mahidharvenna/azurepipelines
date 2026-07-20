@@ -1,16 +1,55 @@
 {
-  "DEV1": { "pc": "maintenance/rel-2026.06",     "bc": "maintenance/rel-2026.06", "cc": "maintenance/rel-2026.06", "cm": "maintenance/rel-2026.06" },
-  "DEV2": { "pc": "releases/rel-2026.04",        "bc": "releases/rel-2026.04",    "cc": "releases/rel-2026.04",    "cm": "NA" },
-  "DEV3": { "pc": "NA",                          "bc": "NA",                      "cc": "maintenance/rel-2026.06", "cm": "maintenance/rel-2026.06" },
-  "DEV4": { "pc": "feature/example-migration",   "bc": "feature/example-migration", "cc": "NA",                    "cm": "NA" },
+  "DEV1": {
+    "branch": "maintenance/rel-2026.06",
+    "products": ["pc", "bc", "cc", "cm"]
+  },
+  "DEV2": {
+    "branch": "releases/rel-2026.04",
+    "products": ["pc", "bc", "cc"]
+  },
+  "DEV3": {
+    "branch": "maintenance/rel-2026.06",
+    "products": ["cc", "cm"]
+  },
+  "DEV4": {
+    "branch": "feature/example-migration",
+    "products": ["pc", "bc"],
+    "overrides": {
+      "bc": "feature/example-org-merge"
+    }
+  },
 
-  "QA1":  { "pc": "maintenance/rel-2026.06",     "bc": "maintenance/rel-2026.06", "cc": "maintenance/rel-2026.06", "cm": "NA" },
-  "QA2":  { "pc": "maintenance/rel-2026.06",     "bc": "NA",                      "cc": "NA",                      "cm": "NA" },
-  "QA7":  { "pc": "maintenance/rel-2026.08",     "bc": "maintenance/rel-2026.08", "cc": "maintenance/rel-2026.08", "cm": "NA" },
-  "QA8":  { "pc": "maintenance/rel-2026.08",     "bc": "maintenance/rel-2026.08", "cc": "maintenance/rel-2026.08", "cm": "NA" },
-  "QA12": { "pc": "maintenance/rel-2026.06_hf",  "bc": "NA",                      "cc": "NA",                      "cm": "NA" },
+  "QA1": {
+    "branch": "maintenance/rel-2026.06",
+    "products": ["pc", "bc", "cc"]
+  },
+  "QA2": {
+    "branch": "maintenance/rel-2026.06",
+    "products": ["pc"]
+  },
+  "QA7": {
+    "branch": "maintenance/rel-2026.08",
+    "products": ["pc", "bc", "cc"]
+  },
+  "QA8": {
+    "branch": "maintenance/rel-2026.08",
+    "products": ["pc", "bc", "cc"]
+  },
+  "QA12": {
+    "branch": "maintenance/rel-2026.06_hf",
+    "products": ["pc"]
+  },
 
-  "UAT1": { "pc": "maintenance/rel-2026.06",     "bc": "maintenance/rel-2026.06", "cc": "maintenance/rel-2026.06", "cm": "NA" },
-  "UAT2": { "pc": "feature/example-migration",   "bc": "feature/example-migration", "cc": "NA",                    "cm": "NA" },
-  "UAT3": { "pc": "releases/rel-2026.04",        "bc": "releases/rel-2026.04",    "cc": "releases/rel-2026.04",    "cm": "NA" }
+  "UAT1": {
+    "branch": "maintenance/rel-2026.06",
+    "products": ["pc", "bc", "cc"]
+  },
+  "UAT2": {
+    "branch": "feature/example-migration",
+    "products": ["pc", "bc"]
+  },
+  "UAT3": {
+    "branch": "releases/rel-2026.04",
+    "products": ["pc", "bc", "cc"]
+  }
 }

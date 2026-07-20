@@ -55,20 +55,46 @@ pipeline picks it up.
 
 ## The config file
 
-`config/branches.json` maps **env label → product → branch**:
+All four centres normally sit on the **same** branch for a given release, so
+`config/branches.json` records **one branch per env** plus the list of products
+in that release:
 
 ```json
 {
-  "QA7":  { "pc": "maintenance/rel-2026.08", "bc": "maintenance/rel-2026.08", "cc": "maintenance/rel-2026.08", "cm": "NA" },
-  "UAT1": { "pc": "maintenance/rel-2026.06", "bc": "maintenance/rel-2026.06", "cc": "maintenance/rel-2026.06", "cm": "NA" }
+  "QA7": {
+    "branch":   "maintenance/rel-2026.08",
+    "products": ["pc", "bc", "cc"]
+  },
+  "UAT1": {
+    "branch":   "maintenance/rel-2026.06",
+    "products": ["pc", "bc", "cc"]
+  }
 }
 ```
 
-- The **env label** is `<TIER><INSTANCE>` uppercased — `DEV2`, `QA7`, `UAT1`.
-  It's built from the pipeline's tier plus the instance chosen at queue time.
-- `"NA"` (or a missing key, or blank) means **that product is not part of this
-  release** — it will never build or deploy for that env.
-- When the release branch rolls, edit this one file and commit. Done.
+- **`branch`** — applies to every product listed. Change it in one place when
+  the release rolls; all centres follow.
+- **`products`** — which centres are in this release. A product not listed
+  never builds or deploys for that env (the equivalent of `NA` in a release
+  matrix). CM is usually omitted.
+- The **env label** is `<TIER><INSTANCE>` uppercased — `DEV2`, `QA7`, `UAT1` —
+  built from the pipeline's tier plus the instance chosen at queue time.
+
+### Exceptions
+
+When one centre is off on its own branch, add an `overrides` block. Everything
+else still follows `branch`:
+
+```json
+"DEV4": {
+  "branch":    "feature/example-migration",
+  "products":  ["pc", "bc"],
+  "overrides": { "bc": "feature/example-org-merge" }
+}
+```
+
+The **ReadConfig** log prints the resolved branch per product and marks any
+override, so a run always shows exactly what it used.
 
 ### Keeping it in sync with a release matrix
 

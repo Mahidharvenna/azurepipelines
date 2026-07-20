@@ -7,9 +7,16 @@
 #   branch_<comp>  -> the release branch to build from
 #   run_<comp>     -> 'true'/'false': whether to build+deploy this product
 #
+# Config shape (one branch per env; all centres normally share it):
+#   "QA7": {
+#     "branch":   "maintenance/rel-2026.08",   <- applies to every product listed
+#     "products": ["pc", "bc", "cc"],          <- what is in this release
+#     "overrides": { "bc": "feature/x" }       <- optional, rare exceptions
+#   }
+#
 # Product selection rules:
-#   * A product with no entry (or "NA") for this env NEVER runs.
-#   * useConfigProducts = true  -> run every product the config lists (scheduled runs)
+#   * A product not in "products" NEVER runs for that env.
+#   * useConfigProducts = true  -> run every product in "products" (scheduled runs)
 #   * useConfigProducts = false -> run only the ticked checkboxes (manual runs)
 #
 # Why a runtime read? ADO resolves stages/resources/schedules at COMPILE time and
@@ -64,6 +71,19 @@ stages:
             exit 1
           }
 
+          $defaultBranch = $envCfg.branch
+          if ([string]::IsNullOrWhiteSpace($defaultBranch)) {
+            Write-Error "Env '$envLabel' has no 'branch' value in config/branches.json."
+            exit 1
+          }
+
+          $products = @($envCfg.products)
+          if ($products.Count -eq 0) {
+            Write-Error "Env '$envLabel' lists no 'products' in config/branches.json."
+            exit 1
+          }
+
+          $overrides = $envCfg.overrides
           $useConfig = "${{ parameters.useConfigProducts }}".ToLower() -eq 'true'
           $checkbox = @{
             pc = "${{ parameters.deployPC }}".ToLower() -eq 'true'
@@ -73,30 +93,38 @@ stages:
           }
 
           Write-Host "Env            : $envLabel"
+          Write-Host "Default branch : $defaultBranch"
+          Write-Host "In release     : $($products -join ', ')"
           Write-Host "Product source : $(if ($useConfig) { 'config file' } else { 'queue-time checkboxes' })"
           Write-Host "----------------------------------------------------"
 
           $anyRun = $false
           foreach ($comp in 'pc','bc','cc','cm') {
-            $branch = $envCfg.$comp
 
-            # Treat missing / blank / "NA" as "not part of this release"
-            if ([string]::IsNullOrWhiteSpace($branch) -or $branch -eq 'NA') {
-              Write-Host ("{0,-3} : not configured for {1} -- skipping" -f $comp.ToUpper(), $envLabel)
+            if ($products -notcontains $comp) {
+              Write-Host ("{0,-3} : not in this release -- skipping" -f $comp.ToUpper())
               Write-Host "##vso[task.setvariable variable=run_$comp;isOutput=true]false"
               continue
+            }
+
+            # Per-product exception, else the env's shared branch
+            $branch = $defaultBranch
+            $note = ''
+            if ($null -ne $overrides -and -not [string]::IsNullOrWhiteSpace($overrides.$comp)) {
+              $branch = $overrides.$comp
+              $note = '  (override)'
             }
 
             $run = if ($useConfig) { $true } else { $checkbox[$comp] }
             if ($run) { $anyRun = $true }
 
-            Write-Host ("{0,-3} : branch '{1}' -> run={2}" -f $comp.ToUpper(), $branch, $run)
+            Write-Host ("{0,-3} : {1} -> run={2}{3}" -f $comp.ToUpper(), $branch, $run, $note)
             Write-Host "##vso[task.setvariable variable=branch_$comp;isOutput=true]$branch"
             Write-Host "##vso[task.setvariable variable=run_$comp;isOutput=true]$($run.ToString().ToLower())"
           }
 
           Write-Host "----------------------------------------------------"
           if (-not $anyRun) {
-            Write-Error "Nothing to deploy for '$envLabel'. Either the config lists no products for this env, or no product checkboxes were ticked."
+            Write-Error "Nothing to deploy for '$envLabel'. Either untick 'useConfigProducts' and tick a product, or check the config."
             exit 1
           }
