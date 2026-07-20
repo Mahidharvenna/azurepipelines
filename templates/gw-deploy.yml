@@ -32,6 +32,9 @@ parameters:
 - name: runCondition            # runtime condition -> whether this product deploys at all
   type: string
   default: succeeded()
+- name: dbSchema                # SQL schema owning the tracking tables
+  type: string
+  default: 'dbo'
 
 jobs:
 - deployment: Deploy_${{ upper(parameters.comp) }}
@@ -84,9 +87,15 @@ jobs:
             errorActionPreference: stop
             failOnStderr: false
             script: |
+              # Classic writes $(Build.SourceBranchName) -- the TRAILING SEGMENT only
+              # (maintenance/rel-2026.06 -> rel-2026.06). Existing rows use that
+              # form, so match it or the previous-branch comparison never hits and
+              # every run reports "SourceBranch Changed".
+              $branchShort = ("$(releaseBranch)" -split '/')[-1]
+
               $connectionString = "Server=$(DBINSTANCE);Database=$(DBNAME);user=$(DBUSER);password=$(DBPASS)"
-              $releaseNotesLogTableName = "dbo.ReleaseNotesLog"
-              $currentBuildTableName    = "dbo.CurrentBuild"
+              $releaseNotesLogTableName = "${{ parameters.dbSchema }}.ReleaseNotesLog"
+              $currentBuildTableName    = "${{ parameters.dbSchema }}.CurrentBuild"
 
               function ExecuteSqlQuery {
                 param ([string]$ConnectionString, [string]$Query, [bool]$ReturnData = $false)
@@ -109,13 +118,13 @@ jobs:
               if ($null -eq $previousBuildID) {
                 ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               INSERT INTO $currentBuildTableName (StageName, CurrentBuildID, SourceBranch)
-              VALUES ('${{ parameters.envName }}', '$(Build.BuildId)', '$(releaseBranch)')
+              VALUES ('${{ parameters.envName }}', '$(Build.BuildId)', '$branchShort')
               "@
               }
 
               ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               INSERT INTO $releaseNotesLogTableName (BuildName, SourceBranch, PreviousBuildID, ReleaseName, RunName, StageName, Attempt, Status)
-              VALUES ('$(Build.DefinitionName)', '$(releaseBranch)', '$previousBuildID', '$(Build.BuildNumber)', '$(Build.BuildNumber)', '${{ parameters.envName }}', '$(System.JobAttempt)', 'Started')
+              VALUES ('$(Build.DefinitionName)', '$branchShort', '$previousBuildID', '$(Build.BuildNumber)', '$(Build.BuildNumber)', '${{ parameters.envName }}', '$(System.JobAttempt)', 'Started')
               "@
 
         # --- 2. Shutdown Guidewire ---
@@ -332,10 +341,16 @@ jobs:
             errorActionPreference: stop
             failOnStderr: false
             script: |
+              # Classic writes $(Build.SourceBranchName) -- the TRAILING SEGMENT only
+              # (maintenance/rel-2026.06 -> rel-2026.06). Existing rows use that
+              # form, so match it or the previous-branch comparison never hits and
+              # every run reports "SourceBranch Changed".
+              $branchShort = ("$(releaseBranch)" -split '/')[-1]
+
               $connectionString = "Server=$(DBINSTANCE);Database=$(DBNAME);user=$(DBUSER);password=$(DBPASS)"
-              $releaseNotesTableName    = "dbo.ReleaseNotes"
-              $releaseNotesLogTableName = "dbo.ReleaseNotesLog"
-              $currentBuildTableName    = "dbo.CurrentBuild"
+              $releaseNotesTableName    = "${{ parameters.dbSchema }}.ReleaseNotes"
+              $releaseNotesLogTableName = "${{ parameters.dbSchema }}.ReleaseNotesLog"
+              $currentBuildTableName    = "${{ parameters.dbSchema }}.CurrentBuild"
               $projectName              = "MyOrg"
 
               function ExecuteSqlQuery {
@@ -366,7 +381,7 @@ jobs:
                 -Query "SELECT SourceBranch from $currentBuildTableName where StageName = '${{ parameters.envName }}'" `
                 -ReturnData $true
 
-              if ($previousBranch -eq '$(releaseBranch)') {
+              if ($previousBranch -eq '$branchShort') {
                 $FROMBUILD = ExecuteSqlQuery -ConnectionString $connectionString `
                   -Query "SELECT CurrentBuildID from $currentBuildTableName where StageName = '${{ parameters.envName }}'" `
                   -ReturnData $true
@@ -378,7 +393,7 @@ jobs:
                     $msg = $v.message.Replace("'","''")
                     ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               INSERT INTO $releaseNotesTableName (ReleaseName, StageName, BuildName, SourceBranch, CommitInfo, CommitAuthor, CommitTimestamp)
-              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '$(releaseBranch)', '$msg', '$($v.author.displayName)', '$($v.timestamp)')
+              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '$branchShort', '$msg', '$($v.author.displayName)', '$($v.timestamp)')
               "@
                   }
                   $finalStatus = 'Completed'
@@ -390,7 +405,7 @@ jobs:
               } else {
                 ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               INSERT INTO $releaseNotesTableName (ReleaseName, StageName, BuildName, SourceBranch, CommitInfo, CommitAuthor, CommitTimestamp)
-              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '$(releaseBranch)', 'SourceBranch Changed', 'NA', 'NA')
+              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '$branchShort', 'SourceBranch Changed', 'NA', 'NA')
               "@
                 $finalStatus = 'SourceBranch Changed'
               }
@@ -404,7 +419,7 @@ jobs:
 
               ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               UPDATE $currentBuildTableName
-              SET SourceBranch   = '$(releaseBranch)',
+              SET SourceBranch   = '$branchShort',
                   CurrentBuildID = '$(Build.BuildId)'
               WHERE StageName    = '${{ parameters.envName }}'
               "@

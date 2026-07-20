@@ -29,6 +29,9 @@ parameters:
 - name: notifyTeams          # false = Notify stage is present but skipped
   type: boolean
   default: false
+- name: dbSchema             # SQL schema owning the tracking tables (dbo, or your own)
+  type: string
+  default: 'dbo'
 - name: poolName
   type: string
   default: Default
@@ -155,6 +158,7 @@ stages:
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_pc'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_pc'], 'true'))
       poolName: ${{ parameters.poolName }}
+      dbSchema: ${{ parameters.dbSchema }}
   - template: gw-deploy.yml
     parameters:
       comp: bc
@@ -167,6 +171,7 @@ stages:
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_bc'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_bc'], 'true'))
       poolName: ${{ parameters.poolName }}
+      dbSchema: ${{ parameters.dbSchema }}
   - template: gw-deploy.yml
     parameters:
       comp: cc
@@ -179,6 +184,7 @@ stages:
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cc'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cc'], 'true'))
       poolName: ${{ parameters.poolName }}
+      dbSchema: ${{ parameters.dbSchema }}
   # --- CM is special: COMP=ab (legacy), different CATALINA_BASE, artifact 'cm-drop' ---
   - template: gw-deploy.yml
     parameters:
@@ -192,6 +198,7 @@ stages:
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cm'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cm'], 'true'))
       poolName: ${{ parameters.poolName }}
+      dbSchema: ${{ parameters.dbSchema }}
 
 # --------------------------------------------------------------------------
 # STAGE 4 : NOTIFY -- posts a summary to Teams.
