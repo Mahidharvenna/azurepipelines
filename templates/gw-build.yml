@@ -21,6 +21,9 @@ parameters:
 - name: runCondition           # runtime condition -> whether this product builds at all
   type: string
   default: succeeded()
+- name: cleanSources           # mirrors each product's classic "Clean sources" setting
+  type: boolean
+  default: false
 
 jobs:
 - job: Build_${{ upper(parameters.comp) }}
@@ -32,14 +35,16 @@ jobs:
     # branchExpr is a runtime expression string ($[ stageDependencies... ]);
     # substituting it here makes releaseBranch resolve at run time.
     releaseBranch: ${{ parameters.branchExpr }}
-  workspace:
-    clean: all
+  # Classic parity: PC cleans sources; BC/CC/CM do not.
+  ${{ if eq(parameters.cleanSources, true) }}:
+    workspace:
+      clean: all
   steps:
 
   # ADO Server 2022 RTW does not allow `ref:` on `checkout:`. We check out the
   # resource's default ref, then switch to the configured release branch.
   - checkout: ${{ parameters.repo }}
-    clean: true
+    clean: ${{ parameters.cleanSources }}
     persistCredentials: true       # keep agent git auth for the fetch/checkout below
 
   - script: |

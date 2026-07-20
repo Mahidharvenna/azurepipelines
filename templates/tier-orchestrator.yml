@@ -87,6 +87,7 @@ stages:
       poolName: ${{ parameters.poolName }}
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_pc'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_pc'], 'true'))
+      cleanSources: true          # classic PC build cleans sources; BC/CC/CM do not
   - template: gw-build.yml
     parameters:
       comp: bc
