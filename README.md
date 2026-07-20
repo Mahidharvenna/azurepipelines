@@ -216,6 +216,17 @@ parameters:
 `always: false` means the run is skipped when nothing has been committed to
 `master` since the last run.
 
+## Scope: lower environments only
+
+These pipelines target **Dev / QA / UAT**, where each environment has exactly
+one host per centre and one SSH connection named `<ENV>-<COMP>` (e.g. `DEV1-PC`).
+
+They are **not** suitable for clustered environments as-is. Production estates
+typically run several nodes per centre (`PROD_CC_IT1`, `IT2`, `IT3`, …), which
+needs a deploy template that fans out over a node list, plus decisions about
+rolling restarts and draining. Extending there is a design exercise, not a
+config change.
+
 ## Prerequisites
 
 - Azure DevOps Server 2020+ (or Azure DevOps Services) — multi-stage YAML and
