@@ -84,6 +84,19 @@
       "note": "paused during hotfix testing - flip enabled back to true to resume"
     }
   },
+  "UAT": {
+    "branch": "maintenance/rel-2026.06",
+    "products": [
+      "pc",
+      "bc",
+      "cc"
+    ],
+    "schedule": {
+      "enabled": true,
+      "cron": "0 6 * * 6",
+      "note": "06:00 UTC Saturday - mirrored in pipelines/release-uat.yaml"
+    }
+  },
   "UAT1": {
     "branch": "maintenance/rel-2026.06",
     "products": [

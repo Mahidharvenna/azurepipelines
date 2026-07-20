@@ -22,7 +22,7 @@ parameters:
   displayName: 'QA instance'
   type: string
   default: '1'
-  values: ['1', '2', '3', '4', '5', '7', '8', '9', '10', '12']
+  values: ['', '1', '2', '3', '4', '5', '7', '8', '9', '10', '12']
 
 - name: useConfigProducts
   displayName: 'Deploy everything config lists for this env (untick to pick manually)'

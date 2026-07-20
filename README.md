@@ -79,6 +79,10 @@ in that release:
   matrix). CM is usually omitted.
 - The **env label** is `<TIER><INSTANCE>` uppercased — `DEV2`, `QA7`, `UAT1` —
   built from the pipeline's tier plus the instance chosen at queue time.
+- **Unnumbered environments are supported**: leave the instance blank and the
+  label is just the tier (`UAT`), giving ADO environment `uat`, SSH connection
+  `UAT-PC`, and `StageName` `PC-UAT`. Real estates often mix both — several
+  numbered DEV/QA instances alongside a single unnumbered UAT.
 
 ### Optional per-env flags
 
