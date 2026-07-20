@@ -280,16 +280,25 @@ jobs:
               fi
             readyTimeout: '20000'
 
-        # --- 11. Swap prod mail domain -> dev mail domain ---
+        # --- 11. Remove prod mail domains from ScriptParameters.xml ---
+        # SAFETY STEP. Classic does NOT swap prod for a non-prod domain -- it
+        # STRIPS the prod domain(s) entirely, so "someone@prod.example" becomes
+        # "someone", an unsendable address. That is what stops a non-prod
+        # environment from emailing real recipients.
+        #
+        # List EVERY prod mail domain your org uses here; each becomes its own
+        # `-e 's/@domain//g'`. The trailing cat echoes the result to the log so
+        # you can confirm the addresses were neutralised.
         - task: SSH@0
-          displayName: 'Replace prod mail id in ScriptParameters.xml'
+          displayName: 'Remove prod mail id from ScriptParameters.xml'
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
             runOptions: inline
             interpreterCommand: '/bin/bash'
             inline: |
-              sed -i 's/@example.com/@internal.example.com/g' \
-                ${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}/modules/configuration/config/resources/ScriptParameters.xml
+              SP=${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}/modules/configuration/config/resources/ScriptParameters.xml
+              sed -i -e 's/@example.com//g' -e 's/@example.net//g' "$SP"
+              cat "$SP"
             readyTimeout: '20000'
 
         # --- 12. Update log dir in log4j2.xml ---

@@ -113,12 +113,28 @@ wrapper and change the default `envInstance` and cron.
 | `https://your-ado-host.example.com/your-collection` | your ADO Server URL |
 | `C:\path\to\gw-core` | on-agent path to your Guidewire core install |
 | `'deployment-secrets'` | your variable group name |
-| `@example.com` / `@internal.example.com` | your prod / non-prod mail domains |
-| `dbo.ReleaseNotesLog` / `dbo.CurrentBuild` / `dbo.ReleaseNotes` | your schema |
+| `@example.com`, `@example.net` (step 11 `sed`) | **every** prod mail domain to strip — see below |
+| `dbSchema` default `'dbo'` in `tier-orchestrator.yml` | your tracking-DB schema |
 | `catalinaBase*` values | your Tomcat paths — **verify, see below** |
 | `config/branches.json` | your real envs and branches |
 
-### 2. Verify the Tomcat paths — do not assume
+### 2. Non-prod mail safety (step 11) — get this right
+
+Step 11 **strips** prod mail domains from `ScriptParameters.xml` so a non-prod
+environment cannot email real recipients. It does not swap to another domain —
+it removes the `@domain` entirely, leaving an unsendable address.
+
+List every prod mail domain your org uses, each as its own `-e 's/@domain//g'`:
+
+```bash
+sed -i -e 's/@yourprod1.example//g' -e 's/@yourprod2.example//g' "$SP"
+```
+
+Read the exact list off the classic task group's *"Remove prod mail id…"* step —
+missing a domain here means that environment can send live mail to customers.
+This is the one substitution worth double-checking against the real deploy.
+
+### 3. Verify the Tomcat paths — do not assume
 
 Tomcat installs are commonly **not** uniform across centres:
 
@@ -140,7 +156,7 @@ to /opt/tomcat-cc/apache-tomcat/webapps/cc.war on remote machine.
 A wrong value does not fail fast — the deploy shuts down, unpacks and restarts
 against whatever path you gave it.
 
-### 3. ADO prerequisites
+### 4. ADO prerequisites
 
 - **Environments** — one per `<tier><instance>`, lowercase: `dev1`, `qa7`, `uat1`
 - **SSH service connections** — named `<TIER><INSTANCE>-<COMP>`: `DEV1-PC`, `UAT1-CC`
@@ -148,7 +164,7 @@ against whatever path you gave it.
   `pc_userpass`, `bc_userpass`, `cc_userpass`, `ab_userpass` (secrets). Grant the
   pipelines access under **Pipeline permissions**.
 
-### 4. Register the pipelines
+### 5. Register the pipelines
 
 For each wrapper: New pipeline → Existing YAML file → pick the file → `master`.
 
