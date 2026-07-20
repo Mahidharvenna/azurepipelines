@@ -268,12 +268,37 @@ run pauses to authorize each repo resource, SSH connection, variable group, and
 the Environment — permit each and it resumes. Check the **ReadConfig** log first:
 it prints exactly which branch and which products it resolved.
 
-## ContactManager quirks (handled)
+## Per-centre quirks (handled)
+
+### Tomcat installs are not uniform
+
+Each centre deploys to its own host, and the Tomcat path differs by product:
+
+| Centre | `CATALINA_BASE` |
+|---|---|
+| PC | `/opt/tomcat/apache-tomcat` |
+| BC | `/opt/tomcat/apache-tomcat` |
+| CC | `/opt/tomcat-cc/apache-tomcat` |
+| CM | `/opt/tomcat-cm/apache-tomcat` |
+
+These are set as four explicit variables in `tier-orchestrator.yml`. **Verify
+yours before first deploy** — the classic release log's *"Copy Latest war file
+to Server"* step prints the exact target path, which is the most reliable
+source:
+
+```
+Copying file ...\drop\dist\wars\TomcatDbcp\cc.war
+to /opt/tomcat-cc/apache-tomcat/webapps/cc.war on remote machine.
+```
+
+A wrong value doesn't fail fast — the deploy will shut down, unpack and restart
+against whatever path you gave it.
+
+### ContactManager
 
 - `COMP` is passed as `ab` (not `cm`) to match legacy task-group case statements
-- `CATALINA_BASE` overridden to `/opt/tomcat-cm/apache-tomcat`
 - Artifact stays `cm-drop` (built from the CM repo)
-- Usually `"cm": "NA"` in the config — CM deploys far less often than the rest
+- Often omitted from `products` — CM deploys far less often than the rest
 
 ## License
 

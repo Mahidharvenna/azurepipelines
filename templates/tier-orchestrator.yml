@@ -50,10 +50,18 @@ resources:
 
 variables:
 - group: 'deployment-secrets'
-- name: catalinaBase
-  value: '/opt/tomcat/apache-tomcat'          # PC/BC/CC default
+# One CATALINA_BASE per centre -- these are NOT uniform. PC and BC use the
+# default install; CC and CM each live in their own Tomcat. Verify against a
+# classic deploy log before changing: the "Copy Latest war file to Server"
+# step prints the exact target path it copied to.
+- name: catalinaBasePC
+  value: '/opt/tomcat/apache-tomcat'
+- name: catalinaBaseBC
+  value: '/opt/tomcat/apache-tomcat'
+- name: catalinaBaseCC
+  value: '/opt/tomcat-cc/apache-tomcat'
 - name: catalinaBaseCM
-  value: '/opt/tomcat-cm/apache-tomcat'       # CM lives in its own Tomcat
+  value: '/opt/tomcat-cm/apache-tomcat'
 
 stages:
 
@@ -131,7 +139,7 @@ stages:
       envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
       envName: 'PC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
       sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-PC'
-      catalinaBase: $(catalinaBase)
+      catalinaBase: $(catalinaBasePC)
       artifactName: 'pc-drop'
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_pc'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_pc'], 'true'))
@@ -143,7 +151,7 @@ stages:
       envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
       envName: 'BC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
       sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-BC'
-      catalinaBase: $(catalinaBase)
+      catalinaBase: $(catalinaBaseBC)
       artifactName: 'bc-drop'
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_bc'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_bc'], 'true'))
@@ -155,7 +163,7 @@ stages:
       envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
       envName: 'CC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
       sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-CC'
-      catalinaBase: $(catalinaBase)
+      catalinaBase: $(catalinaBaseCC)                            # CC has its own Tomcat
       artifactName: 'cc-drop'
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cc'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cc'], 'true'))
