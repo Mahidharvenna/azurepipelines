@@ -59,7 +59,7 @@ jobs:
 
         # --- 1. Pre-deployment: insert "Started" row in Dashboard DB ---
         - task: PowerShell@2
-          displayName: 'Pre-Deployment - Update Dashboard DB'
+          displayName: 'Pre-Deployment - Update deployment-tracking DB'
           inputs:
             targetType: inline
             errorActionPreference: stop
@@ -290,7 +290,7 @@ jobs:
 
         # --- 15. Post-deployment: write commits + final status to Dashboard DB ---
         - task: PowerShell@2
-          displayName: 'Post-Deployment - Update Dashboard DB'
+          displayName: 'Post-Deployment - Update deployment-tracking DB'
           condition: always()
           env:
             SYSTEM_ACCESSTOKEN: $(System.AccessToken)
