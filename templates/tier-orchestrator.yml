@@ -26,6 +26,9 @@ parameters:
   type: boolean
 - name: deployCM
   type: boolean
+- name: notifyTeams          # false = Notify stage is present but skipped
+  type: boolean
+  default: false
 - name: poolName
   type: string
   default: Default
@@ -181,3 +184,13 @@ stages:
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cm'] ]
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cm'], 'true'))
       poolName: ${{ parameters.poolName }}
+
+# --------------------------------------------------------------------------
+# STAGE 4 : NOTIFY -- posts a summary to Teams.
+# Present but skipped until notifyTeams is true and TEAMS_WEBHOOK is set.
+# --------------------------------------------------------------------------
+- template: notify-teams.yml
+  parameters:
+    envLabel: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+    notifyTeams: ${{ parameters.notifyTeams }}
+    poolName: ${{ parameters.poolName }}

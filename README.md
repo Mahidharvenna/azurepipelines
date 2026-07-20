@@ -189,6 +189,30 @@ out at startup as a `NoClassDefFoundError` deep in OSGi.
 
 ---
 
+## Teams notifications
+
+A **Notify** stage posts a deployment summary to a Teams channel. It is
+**off by default** — the stage still appears in every run, marked *skipped*, so
+it is discoverable rather than hidden.
+
+To enable:
+
+1. Create an incoming webhook on the target channel (channel → **⋯ → Connectors
+   → Incoming Webhook**, or a Power Automate *"When a Teams webhook request is
+   received"* flow on newer tenants)
+2. Add the URL to the variable group as **`TEAMS_WEBHOOK`**, marked **secret** —
+   a webhook URL is effectively a write credential for that channel
+3. Tick **Post a summary to Teams** on the run, or flip the wrapper's
+   `notifyTeams` default to `true`
+
+The message reports environment, run number, who triggered it, the reason, and
+one line per centre with the branch it deployed — plus a link back to the run.
+It fires on failure too (`always()`), so a broken deploy still notifies.
+
+It posts with plain `Invoke-RestMethod`, so no marketplace extension is needed
+on ADO Server. If `TEAMS_WEBHOOK` is missing the step logs a warning and exits
+cleanly rather than failing the run.
+
 ## Scope: lower environments only
 
 These pipelines target **Dev / QA / UAT**, where each environment has one host

@@ -1,0 +1,129 @@
+# =============================================================================
+# Teams notification stage -- posts a deployment summary to an incoming webhook.
+#
+# DISABLED BY DEFAULT. The stage is always present in the pipeline graph but
+# skips unless notifyTeams is true, so it is visible and discoverable rather
+# than hidden until someone remembers it exists.
+#
+# To turn it on:
+#   1. Create an incoming webhook on the target Teams channel
+#      (channel -> ... -> Connectors -> Incoming Webhook, or a Power Automate
+#      "When a Teams webhook request is received" flow on newer tenants)
+#   2. Add the URL to the pipeline's variable group as TEAMS_WEBHOOK
+#      -- mark it secret; a webhook URL is a write credential for that channel
+#   3. Set notifyTeams: true on the wrapper pipeline
+#
+# Uses plain Invoke-RestMethod rather than a marketplace task, so it works on
+# ADO Server without installing an extension.
+# =============================================================================
+
+parameters:
+- name: envLabel                 # e.g. DEV1 -- shown in the message
+  type: string
+- name: notifyTeams              # false = stage present but skipped
+  type: boolean
+  default: false
+- name: poolName
+  type: string
+  default: Default
+
+stages:
+- stage: Notify
+  displayName: 'Notify Teams'
+  dependsOn:
+  - ReadConfig
+  - Build
+  - Deploy
+  # always() so a FAILED deploy still notifies; the parameter gates it off.
+  condition: and(always(), eq('${{ parameters.notifyTeams }}', 'true'))
+  jobs:
+  - job: PostToTeams
+    displayName: 'Post deployment summary'
+    pool:
+      name: ${{ parameters.poolName }}
+    variables:
+      buildResult:  $[ dependencies.Build.result ]
+      deployResult: $[ dependencies.Deploy.result ]
+      branchPc:     $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_pc'] ]
+      branchBc:     $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_bc'] ]
+      branchCc:     $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cc'] ]
+      branchCm:     $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cm'] ]
+      runPc:        $[ stageDependencies.ReadConfig.Read.outputs['cfg.run_pc'] ]
+      runBc:        $[ stageDependencies.ReadConfig.Read.outputs['cfg.run_bc'] ]
+      runCc:        $[ stageDependencies.ReadConfig.Read.outputs['cfg.run_cc'] ]
+      runCm:        $[ stageDependencies.ReadConfig.Read.outputs['cfg.run_cm'] ]
+    steps:
+    - checkout: none
+    - task: PowerShell@2
+      displayName: 'Post to Teams channel'
+      inputs:
+        targetType: inline
+        errorActionPreference: stop
+        script: |
+          $webhook = "$(TEAMS_WEBHOOK)"
+          if ([string]::IsNullOrWhiteSpace($webhook) -or $webhook -like '*TEAMS_WEBHOOK*') {
+            Write-Host "##vso[task.logissue type=warning]TEAMS_WEBHOOK is not set -- skipping notification."
+            exit 0
+          }
+
+          $envLabel = "${{ parameters.envLabel }}"
+          $deploy   = "$(deployResult)"
+          $build    = "$(buildResult)"
+
+          # Overall status: deploy result dominates, build result is the fallback
+          $status = if ($deploy -eq 'Succeeded') { 'Succeeded' }
+                    elseif ($deploy -eq 'SucceededWithIssues') { 'Succeeded with issues' }
+                    elseif ($deploy -eq 'Skipped' -and $build -ne 'Succeeded') { 'Build failed' }
+                    else { 'Failed' }
+
+          $colour = switch ($status) {
+            'Succeeded'             { '2EB886' }
+            'Succeeded with issues' { 'DAA038' }
+            default                 { 'D93F3C' }
+          }
+
+          # One line per centre that actually ran
+          $centres = @()
+          foreach ($c in @(
+            @{ n='PolicyCenter';    run="$(runPc)"; br="$(branchPc)" },
+            @{ n='BillingCenter';   run="$(runBc)"; br="$(branchBc)" },
+            @{ n='ClaimCenter';     run="$(runCc)"; br="$(branchCc)" },
+            @{ n='ContactManager';  run="$(runCm)"; br="$(branchCm)" }
+          )) {
+            if ($c.run -eq 'true') { $centres += ("{0} — `{1}`" -f $c.n, $c.br) }
+          }
+          $centreText = if ($centres.Count) { $centres -join "`n`n" } else { '_none_' }
+
+          $runUrl = "$(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
+
+          # Legacy MessageCard format -- accepted by both classic Incoming
+          # Webhook connectors and Power Automate webhook triggers.
+          $payload = @{
+            '@type'      = 'MessageCard'
+            '@context'   = 'https://schema.org/extensions'
+            summary      = "Guidewire deploy to $envLabel : $status"
+            themeColor   = $colour
+            title        = "Guidewire deploy to $envLabel : $status"
+            sections     = @(
+              @{
+                facts = @(
+                  @{ name = 'Environment'; value = $envLabel }
+                  @{ name = 'Run';         value = '$(Build.BuildNumber)' }
+                  @{ name = 'Triggered by';value = '$(Build.RequestedFor)' }
+                  @{ name = 'Reason';      value = '$(Build.Reason)' }
+                )
+                text = "**Centres deployed**`n`n$centreText"
+              }
+            )
+            potentialAction = @(
+              @{
+                '@type'  = 'OpenUri'
+                name     = 'View pipeline run'
+                targets  = @(@{ os = 'default'; uri = $runUrl })
+              }
+            )
+          } | ConvertTo-Json -Depth 10
+
+          Write-Host "Posting summary for $envLabel ($status)"
+          Invoke-RestMethod -Uri $webhook -Method Post -ContentType 'application/json' -Body $payload
+          Write-Host "Notification sent."
