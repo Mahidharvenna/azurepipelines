@@ -1,0 +1,66 @@
+# =============================================================================
+# MyOrg -- DEV release pipeline (wrapper: build + deploy in one run)
+#
+# The release branch is NEVER typed here -- it is read at run time from
+# config/branches.json, keyed by env label (DEV1, DEV2, ...).
+#
+# SCHEDULES: cron must be literal YAML (ADO resolves schedules at compile time
+# and cannot read a config file). A scheduled run uses the parameter DEFAULTS
+# below -- i.e. envInstance '1' and useConfigProducts=true, which deploys
+# whatever config/branches.json lists for that env.
+# To auto-deploy a DIFFERENT instance on its own cadence, copy this file and
+# change the default envInstance + cron.
+# =============================================================================
+
+schedules:
+- cron: '0 6 * * 1-5'                 # 06:00 UTC, Mon-Fri
+  displayName: 'DEV nightly (weekdays)'
+  branches:
+    include: [master]
+  always: false                       # skip if no commits to master since last run
+
+trigger: none
+pr: none
+
+parameters:
+- name: envInstance
+  displayName: 'DEV instance'
+  type: string
+  default: '1'
+  values: ['1', '2', '3', '4']
+
+- name: useConfigProducts
+  displayName: 'Deploy everything config lists for this env (untick to pick manually)'
+  type: boolean
+  default: true
+
+# Only used when "useConfigProducts" is unticked.
+- name: deployPC
+  displayName: '  - PolicyCenter'
+  type: boolean
+  default: false
+- name: deployBC
+  displayName: '  - BillingCenter'
+  type: boolean
+  default: false
+- name: deployCC
+  displayName: '  - ClaimCenter'
+  type: boolean
+  default: false
+- name: deployCM
+  displayName: '  - ContactManager'
+  type: boolean
+  default: false
+
+name: 'MyOrg-DEV${{ parameters.envInstance }}-$(Date:yyyyMMdd).$(Rev:r)'
+
+extends:
+  template: ../templates/tier-orchestrator.yml
+  parameters:
+    envTier: dev
+    envInstance: ${{ parameters.envInstance }}
+    useConfigProducts: ${{ parameters.useConfigProducts }}
+    deployPC: ${{ parameters.deployPC }}
+    deployBC: ${{ parameters.deployBC }}
+    deployCC: ${{ parameters.deployCC }}
+    deployCM: ${{ parameters.deployCM }}

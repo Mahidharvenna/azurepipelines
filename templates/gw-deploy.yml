@@ -1,37 +1,47 @@
 # =============================================================================
-# Reusable deploy template -- 1:1 translation of GW_TEM_Deployment task group.
-# 15 tasks: pre-deploy DB write, shutdown, cleanup, copy WAR, configure, start,
-# log on failure, post-deploy DB write.
+# Reusable deploy template -- 1:1 translation of a typical GW deployment task
+# group. 15 tasks: pre-deploy DB write, shutdown, cleanup, copy WAR, configure,
+# start, log on failure, post-deploy DB write.
+#
+# The release branch arrives as a runtime expression (branchExpr) resolved by
+# the ReadConfig stage; it is surfaced as the runtime variable releaseBranch
+# and used in the Dashboard-DB bookkeeping below.
 # =============================================================================
 
 parameters:
-- name: comp                    # pc, bc, cc, ab  (CM uses 'ab' for legacy reasons -- see DEV1-CM release)
+- name: comp                    # pc, bc, cc, ab  (CM uses 'ab' for legacy reasons)
   type: string
 - name: env                     # dev, qa, etc. (tier only, used in log paths)
   type: string
 - name: envLabel                # full env label (e.g. dev1, qa2) -- maps to ADO Environment
   type: string
-- name: envName                 # stage label for Dashboard rows: PC-DEV1, BC-DEV1, CM-DEV1, ...
+- name: envName                 # stage label for Dashboard rows: PC-DEV1, BC-DEV1, ...
   type: string
-- name: sshConnection           # ADO SSH service-connection name (e.g. DEV1-PC, DEV1-CM)
+- name: sshConnection           # ADO SSH service-connection name (e.g. DEV1-PC)
   type: string
 - name: catalinaBase
   type: string
   default: '/opt/tomcat/apache-tomcat'
-- name: releaseBranch
+- name: branchExpr              # runtime expression -> the release branch (from ReadConfig)
   type: string
-- name: artifactName            # name of the pipeline artifact to download (e.g. pc-drop, cm-drop)
+- name: artifactName            # pipeline artifact to download (e.g. pc-drop, cm-drop)
   type: string
 - name: poolName
   type: string
   default: Default
+- name: runCondition            # runtime condition -> whether this product deploys at all
+  type: string
+  default: succeeded()
 
 jobs:
 - deployment: Deploy_${{ upper(parameters.comp) }}
   displayName: 'Deploy ${{ upper(parameters.comp) }} to ${{ upper(parameters.envLabel) }}'
+  condition: ${{ parameters.runCondition }}
   environment: '${{ parameters.envLabel }}'   # ADO Environment named e.g. dev1, dev2, qa1
   pool:
     name: ${{ parameters.poolName }}
+  variables:
+    releaseBranch: ${{ parameters.branchExpr }}   # resolves at runtime from ReadConfig
   strategy:
     runOnce:
       deploy:
@@ -80,13 +90,13 @@ jobs:
               if ($null -eq $previousBuildID) {
                 ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               INSERT INTO $currentBuildTableName (StageName, CurrentBuildID, SourceBranch)
-              VALUES ('${{ parameters.envName }}', '$(Build.BuildId)', '${{ parameters.releaseBranch }}')
+              VALUES ('${{ parameters.envName }}', '$(Build.BuildId)', '$(releaseBranch)')
               "@
               }
 
               ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               INSERT INTO $releaseNotesLogTableName (BuildName, SourceBranch, PreviousBuildID, ReleaseName, RunName, StageName, Attempt, Status)
-              VALUES ('$(Build.DefinitionName)', '${{ parameters.releaseBranch }}', '$previousBuildID', '$(Build.BuildNumber)', '$(Build.BuildNumber)', '${{ parameters.envName }}', '$(System.JobAttempt)', 'Started')
+              VALUES ('$(Build.DefinitionName)', '$(releaseBranch)', '$previousBuildID', '$(Build.BuildNumber)', '$(Build.BuildNumber)', '${{ parameters.envName }}', '$(System.JobAttempt)', 'Started')
               "@
 
         # --- 2. Shutdown Guidewire ---
@@ -323,7 +333,7 @@ jobs:
                 -Query "SELECT SourceBranch from $currentBuildTableName where StageName = '${{ parameters.envName }}'" `
                 -ReturnData $true
 
-              if ($previousBranch -eq '${{ parameters.releaseBranch }}') {
+              if ($previousBranch -eq '$(releaseBranch)') {
                 $FROMBUILD = ExecuteSqlQuery -ConnectionString $connectionString `
                   -Query "SELECT CurrentBuildID from $currentBuildTableName where StageName = '${{ parameters.envName }}'" `
                   -ReturnData $true
@@ -335,7 +345,7 @@ jobs:
                     $msg = $v.message.Replace("'","''")
                     ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               INSERT INTO $releaseNotesTableName (ReleaseName, StageName, BuildName, SourceBranch, CommitInfo, CommitAuthor, CommitTimestamp)
-              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '${{ parameters.releaseBranch }}', '$msg', '$($v.author.displayName)', '$($v.timestamp)')
+              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '$(releaseBranch)', '$msg', '$($v.author.displayName)', '$($v.timestamp)')
               "@
                   }
                   $finalStatus = 'Completed'
@@ -347,7 +357,7 @@ jobs:
               } else {
                 ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               INSERT INTO $releaseNotesTableName (ReleaseName, StageName, BuildName, SourceBranch, CommitInfo, CommitAuthor, CommitTimestamp)
-              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '${{ parameters.releaseBranch }}', 'SourceBranch Changed', 'NA', 'NA')
+              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '$(releaseBranch)', 'SourceBranch Changed', 'NA', 'NA')
               "@
                 $finalStatus = 'SourceBranch Changed'
               }
@@ -361,7 +371,7 @@ jobs:
 
               ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               UPDATE $currentBuildTableName
-              SET SourceBranch   = '${{ parameters.releaseBranch }}',
+              SET SourceBranch   = '$(releaseBranch)',
                   CurrentBuildID = '$(Build.BuildId)'
               WHERE StageName    = '${{ parameters.envName }}'
               "@

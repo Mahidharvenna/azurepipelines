@@ -1,0 +1,59 @@
+# =============================================================================
+# MyOrg -- QA release pipeline (wrapper: build + deploy in one run)
+#
+# Release branch comes from config/branches.json, keyed by env label (QA1, QA7...).
+# See release-dev.yaml for notes on how scheduling interacts with defaults.
+# =============================================================================
+
+schedules:
+- cron: '0 8 * * 2,4'                 # 08:00 UTC, Tue + Thu
+  displayName: 'QA twice-weekly'
+  branches:
+    include: [master]
+  always: false
+
+trigger: none
+pr: none
+
+parameters:
+- name: envInstance
+  displayName: 'QA instance'
+  type: string
+  default: '1'
+  values: ['1', '2', '3', '4', '5', '7', '8', '9', '10', '12']
+
+- name: useConfigProducts
+  displayName: 'Deploy everything config lists for this env (untick to pick manually)'
+  type: boolean
+  default: true
+
+# Only used when "useConfigProducts" is unticked.
+- name: deployPC
+  displayName: '  - PolicyCenter'
+  type: boolean
+  default: false
+- name: deployBC
+  displayName: '  - BillingCenter'
+  type: boolean
+  default: false
+- name: deployCC
+  displayName: '  - ClaimCenter'
+  type: boolean
+  default: false
+- name: deployCM
+  displayName: '  - ContactManager'
+  type: boolean
+  default: false
+
+name: 'MyOrg-QA${{ parameters.envInstance }}-$(Date:yyyyMMdd).$(Rev:r)'
+
+extends:
+  template: ../templates/tier-orchestrator.yml
+  parameters:
+    envTier: qa
+    envInstance: ${{ parameters.envInstance }}
+    useConfigProducts: ${{ parameters.useConfigProducts }}
+    deployPC: ${{ parameters.deployPC }}
+    deployBC: ${{ parameters.deployBC }}
+    deployCC: ${{ parameters.deployCC }}
+    deployCM: ${{ parameters.deployCM }}

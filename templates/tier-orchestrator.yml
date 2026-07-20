@@ -1,16 +1,23 @@
 # =============================================================================
-# SHARED orchestrator -- the body of every per-tier pipeline.
-# Called via `extends:` from dev/qa/uat/preprod-pipeline.yaml.
-# Holds resources, variables, stages. Change here = change everywhere.
+# SHARED orchestrator -- the body of every per-tier release pipeline.
+# Called via `extends:` from pipelines/release-*.yaml.
+#
+# Flow:  ReadConfig  -> resolve branch + product set from config/branches.json
+#          -> Build   -> selected products, each from its configured branch
+#          -> Deploy  -> selected products to <TIER><INSTANCE>
+#
+# Neither the release branch nor (on scheduled runs) the product set is entered
+# at queue time -- both come from config/branches.json, keyed by env label.
+# Change here = change everywhere.
 # =============================================================================
 
 parameters:
-- name: envTier               # dev, qa, uat, preprod -- set by the entry pipeline
+- name: envTier               # dev, qa, uat -- set by the entry pipeline
   type: string
-- name: releaseBranch         # passed through from queue parameter
+- name: envInstance           # 1, 2, 7 ... -- passed through from queue parameter
   type: string
-- name: envInstance           # 1, 2, 3 ... -- passed through from queue parameter
-  type: string
+- name: useConfigProducts     # true = deploy whatever the config lists (scheduled runs)
+  type: boolean
 - name: deployPC
   type: boolean
 - name: deployBC
@@ -19,15 +26,15 @@ parameters:
   type: boolean
 - name: deployCM
   type: boolean
+- name: poolName
+  type: string
+  default: Default
 
 resources:
   repositories:
   # Same-project Azure Repos Git -- no project prefix needed.
-  # NOTE: ref is intentionally omitted here. ADO Server 2022 RTW does not
-  # allow template expressions in resources.repositories[].ref. The actual
-  # branch is set at checkout time inside gw-build.yml via:
-  #   - checkout: <repo>
-  #     ref: refs/heads/${{ parameters.releaseBranch }}
+  # ref is intentionally omitted (ADO Server 2022 RTW disallows template
+  # expressions here). The branch is applied at checkout time in gw-build.yml.
   - repository: pc
     type: git
     name: PC
@@ -42,7 +49,7 @@ resources:
     name: CM
 
 variables:
-- group: 'Dashboard DB'
+- group: 'deployment-secrets'
 - name: catalinaBase
   value: '/opt/tomcat/apache-tomcat'          # PC/BC/CC default
 - name: catalinaBaseCM
@@ -51,115 +58,113 @@ variables:
 stages:
 
 # --------------------------------------------------------------------------
-# STAGE 0 : Validation -- fail fast if nothing is selected
+# STAGE 1 : ReadConfig -- resolve branch + product set for this env.
+# Fails fast (with a readable message) if the env has no entry, or if
+# nothing would be deployed.
 # --------------------------------------------------------------------------
-- ${{ if and(eq(parameters.deployPC, false), eq(parameters.deployBC, false), eq(parameters.deployCC, false), eq(parameters.deployCM, false)) }}:
-  - stage: Validate
-    displayName: 'Validate selection'
-    jobs:
-    - job: NothingSelected
-      displayName: 'No products selected'
-      pool:
-        name: Default
-      steps:
-      - checkout: none
-      - script: |
-          echo "##vso[task.logissue type=error]No products were selected to build/deploy."
-          echo "##vso[task.logissue type=error]Re-queue and check at least one of PolicyCenter / BillingCenter / ClaimCenter / ContactManager."
-          exit 1
-        displayName: 'Fail with helpful message'
+- template: read-config.yml
+  parameters:
+    envLabel: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+    useConfigProducts: ${{ parameters.useConfigProducts }}
+    deployPC: ${{ parameters.deployPC }}
+    deployBC: ${{ parameters.deployBC }}
+    deployCC: ${{ parameters.deployCC }}
+    deployCM: ${{ parameters.deployCM }}
+    poolName: ${{ parameters.poolName }}
 
 # --------------------------------------------------------------------------
-# STAGE 1 : BUILD (only selected products run, in parallel)
+# STAGE 2 : BUILD -- all four jobs are defined; each runs only if ReadConfig
+# said so (run_<comp> = true). Skipped products show as "skipped", not missing.
 # --------------------------------------------------------------------------
-- ${{ if or(eq(parameters.deployPC, true), eq(parameters.deployBC, true), eq(parameters.deployCC, true), eq(parameters.deployCM, true)) }}:
-  - stage: Build
-    displayName: 'Build selected products'
-    jobs:
-    - ${{ if eq(parameters.deployPC, true) }}:
-      - template: gw-build.yml
-        parameters:
-          comp: pc
-          repo: pc
-          poolName: Default
-          releaseBranch: ${{ parameters.releaseBranch }}
-    - ${{ if eq(parameters.deployBC, true) }}:
-      - template: gw-build.yml
-        parameters:
-          comp: bc
-          repo: bc
-          poolName: Default
-          releaseBranch: ${{ parameters.releaseBranch }}
-    - ${{ if eq(parameters.deployCC, true) }}:
-      - template: gw-build.yml
-        parameters:
-          comp: cc
-          repo: cc
-          poolName: Default
-          releaseBranch: ${{ parameters.releaseBranch }}
-    - ${{ if eq(parameters.deployCM, true) }}:
-      - template: gw-build.yml
-        parameters:
-          comp: cm
-          repo: cm
-          poolName: Default
-          releaseBranch: ${{ parameters.releaseBranch }}
+- stage: Build
+  displayName: 'Build configured products'
+  dependsOn: ReadConfig
+  jobs:
+  - template: gw-build.yml
+    parameters:
+      comp: pc
+      repo: pc
+      poolName: ${{ parameters.poolName }}
+      branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_pc'] ]
+      runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_pc'], 'true'))
+  - template: gw-build.yml
+    parameters:
+      comp: bc
+      repo: bc
+      poolName: ${{ parameters.poolName }}
+      branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_bc'] ]
+      runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_bc'], 'true'))
+  - template: gw-build.yml
+    parameters:
+      comp: cc
+      repo: cc
+      poolName: ${{ parameters.poolName }}
+      branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cc'] ]
+      runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cc'], 'true'))
+  - template: gw-build.yml
+    parameters:
+      comp: cm
+      repo: cm
+      poolName: ${{ parameters.poolName }}
+      branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cm'] ]
+      runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cm'], 'true'))
 
 # --------------------------------------------------------------------------
-# STAGE 2 : DEPLOY to <TIER><INSTANCE>
+# STAGE 3 : DEPLOY to <TIER><INSTANCE>
+# depends on ReadConfig (branch + run vars) AND Build (artifacts).
 # --------------------------------------------------------------------------
-- ${{ if or(eq(parameters.deployPC, true), eq(parameters.deployBC, true), eq(parameters.deployCC, true), eq(parameters.deployCM, true)) }}:
-  - stage: Deploy
-    displayName: 'Deploy to ${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
-    dependsOn: Build
-    condition: succeeded()
-    jobs:
-    - ${{ if eq(parameters.deployPC, true) }}:
-      - template: gw-deploy.yml
-        parameters:
-          comp: pc
-          env: ${{ parameters.envTier }}
-          envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
-          envName: 'PC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
-          sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-PC'
-          catalinaBase: $(catalinaBase)
-          artifactName: 'pc-drop'
-          releaseBranch: ${{ parameters.releaseBranch }}
-          poolName: Default
-    - ${{ if eq(parameters.deployBC, true) }}:
-      - template: gw-deploy.yml
-        parameters:
-          comp: bc
-          env: ${{ parameters.envTier }}
-          envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
-          envName: 'BC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
-          sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-BC'
-          catalinaBase: $(catalinaBase)
-          artifactName: 'bc-drop'
-          releaseBranch: ${{ parameters.releaseBranch }}
-          poolName: Default
-    - ${{ if eq(parameters.deployCC, true) }}:
-      - template: gw-deploy.yml
-        parameters:
-          comp: cc
-          env: ${{ parameters.envTier }}
-          envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
-          envName: 'CC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
-          sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-CC'
-          catalinaBase: $(catalinaBase)
-          artifactName: 'cc-drop'
-          releaseBranch: ${{ parameters.releaseBranch }}
-          poolName: Default
-    # --- CM is special: COMP=ab (legacy), different CATALINA_BASE, but artifact is 'cm-drop' ---
-    - ${{ if eq(parameters.deployCM, true) }}:
-      - template: gw-deploy.yml
-        parameters:
-          comp: ab                                                   # match the classic DEV1-CM release (COMP=ab)
-          env: ${{ parameters.envTier }}
-          envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
-          envName: 'CM-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
-          sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-CM'
-          catalinaBase: $(catalinaBaseCM)                            # /opt/tomcat-cm/apache-tomcat
-          artifactName: 'cm-drop'                                    # downloads what gw-build.yml produced
-          releaseBranch: ${{ parameters.releaseBranch }}
-          poolName: Default
+- stage: Deploy
+  displayName: 'Deploy to ${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+  dependsOn:
+  - ReadConfig
+  - Build
+  jobs:
+  - template: gw-deploy.yml
+    parameters:
+      comp: pc
+      env: ${{ parameters.envTier }}
+      envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
+      envName: 'PC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+      sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-PC'
+      catalinaBase: $(catalinaBase)
+      artifactName: 'pc-drop'
+      branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_pc'] ]
+      runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_pc'], 'true'))
+      poolName: ${{ parameters.poolName }}
+  - template: gw-deploy.yml
+    parameters:
+      comp: bc
+      env: ${{ parameters.envTier }}
+      envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
+      envName: 'BC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+      sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-BC'
+      catalinaBase: $(catalinaBase)
+      artifactName: 'bc-drop'
+      branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_bc'] ]
+      runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_bc'], 'true'))
+      poolName: ${{ parameters.poolName }}
+  - template: gw-deploy.yml
+    parameters:
+      comp: cc
+      env: ${{ parameters.envTier }}
+      envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
+      envName: 'CC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+      sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-CC'
+      catalinaBase: $(catalinaBase)
+      artifactName: 'cc-drop'
+      branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cc'] ]
+      runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cc'], 'true'))
+      poolName: ${{ parameters.poolName }}
+  # --- CM is special: COMP=ab (legacy), different CATALINA_BASE, artifact 'cm-drop' ---
+  - template: gw-deploy.yml
+    parameters:
+      comp: ab                                                   # legacy CM mapping
+      env: ${{ parameters.envTier }}
+      envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
+      envName: 'CM-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+      sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-CM'
+      catalinaBase: $(catalinaBaseCM)                            # /opt/tomcat-cm/apache-tomcat
+      artifactName: 'cm-drop'                                    # built from CM repo
+      branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cm'] ]
+      runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cm'], 'true'))
+      poolName: ${{ parameters.poolName }}

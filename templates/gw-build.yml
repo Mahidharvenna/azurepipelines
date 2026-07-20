@@ -1,6 +1,9 @@
 # =============================================================================
-# Reusable build template for a Guidewire product (PC / BC / CC)
-# Mirrors the classic build pipelines (PC-prod*, BC-*, CC-prod*).
+# Reusable build template for a Guidewire product (PC / BC / CC / CM).
+#
+# The release branch is NOT a parameter here -- it arrives as a runtime
+# expression (branchExpr) resolved by the ReadConfig stage from
+# config/branches.json, and is applied via a git checkout at run time.
 # =============================================================================
 
 parameters:
@@ -13,33 +16,42 @@ parameters:
 - name: poolName
   type: string
   default: Default
-- name: releaseBranch          # branch to check out from the product repo
+- name: branchExpr             # runtime expression -> the release branch (from ReadConfig)
   type: string
+- name: runCondition           # runtime condition -> whether this product builds at all
+  type: string
+  default: succeeded()
 
 jobs:
 - job: Build_${{ upper(parameters.comp) }}
   displayName: '${{ upper(parameters.comp) }} Build'
+  condition: ${{ parameters.runCondition }}
   pool:
     name: ${{ parameters.poolName }}
+  variables:
+    # branchExpr is a runtime expression string ($[ stageDependencies... ]);
+    # substituting it here makes releaseBranch resolve at run time.
+    releaseBranch: ${{ parameters.branchExpr }}
   workspace:
     clean: all
   steps:
 
-  # ADO Server 2022 RTW does not allow `ref:` on `checkout:` (added in later updates).
-  # We checkout the resource's default ref, then switch branches with a git command.
+  # ADO Server 2022 RTW does not allow `ref:` on `checkout:`. We check out the
+  # resource's default ref, then switch to the configured release branch.
   - checkout: ${{ parameters.repo }}
     clean: true
-    persistCredentials: true       # keep agent git auth so the next step can fetch/checkout
+    persistCredentials: true       # keep agent git auth for the fetch/checkout below
 
   - script: |
-      git fetch origin ${{ parameters.releaseBranch }}
-      git checkout ${{ parameters.releaseBranch }}
+      echo Building from configured release branch: $(releaseBranch)
+      git fetch origin $(releaseBranch)
+      git checkout $(releaseBranch)
       git log -1 --oneline
     workingDirectory: '$(Build.Repository.LocalPath)'
-    displayName: 'Switch to release branch: ${{ parameters.releaseBranch }}'
+    displayName: 'Switch to configured release branch'
 
   - task: CopyFiles@2
-    displayName: 'Copy GWR10 Core to: $(Build.Repository.LocalPath)'
+    displayName: 'Copy GW core to: $(Build.Repository.LocalPath)'
     inputs:
       SourceFolder: 'C:\path\to\gw-core\${{ upper(parameters.comp) }}'
       Contents: '**'
@@ -65,8 +77,6 @@ jobs:
     inputs:
       workingDirectory: '$(Build.Repository.LocalPath)'
       script: 'gwb.bat webResources'
-
-  # Note: gwb.bat genDataDictionary intentionally omitted (was disabled in classic build)
 
   - task: CmdLine@2
     displayName: 'Run: gwb.bat warTomcatDBCP'
