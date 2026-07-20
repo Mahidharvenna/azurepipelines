@@ -113,12 +113,55 @@ Each wrapper exposes `useConfigProducts`:
 | **Manual, full env** | leave ticked | Same as above — pick the instance and go. |
 | **Manual, one product** | untick it | Only the product checkboxes you tick are built/deployed (still using the config's branch). |
 
-## Scheduling — and one hard limit
+## Scheduling
 
-`schedules:` blocks are **compile-time**: ADO parses them before any agent runs,
-so **cron times cannot come from the config file.** They must be literal YAML in
-the wrapper. The *branch* can come from the file because it is only applied at
-run time (`git checkout`).
+Scheduling is split across two places, and the split is forced by ADO:
+
+| Piece | Lives in | Why |
+|---|---|---|
+| **When it fires** (`cron`) | the wrapper YAML | `schedules:` is parsed at **compile time**, before any agent runs — it cannot read a repo file |
+| **Whether it runs** (`enabled`) | `config/branches.json` | evaluated at **run time**, so it can come from the config |
+
+### Turning a schedule on/off
+
+Add a `schedule` block to any env:
+
+```json
+"QA12": {
+  "branch":   "maintenance/rel-2026.06_hf",
+  "products": ["pc"],
+  "schedule": {
+    "enabled": false,
+    "cron":    "0 8 * * 2,4",
+    "note":    "paused during hotfix testing"
+  }
+}
+```
+
+With `enabled: false`, a **scheduled** run starts, logs why it is standing down,
+and exits without building or deploying anything:
+
+```
+Scheduled run for 'QA12' is DISABLED in config/branches.json.
+Nothing will be built or deployed. Flip schedule.enabled to true to resume.
+```
+
+**Manual runs ignore the toggle** — you can always deploy on demand while the
+schedule is paused. An env with no `schedule` block behaves as enabled.
+
+So pausing a nightly deploy is a one-line config edit: no pipeline YAML change,
+no ADO UI change, and the pause is visible in git history.
+
+### The `cron` field is a record, not the trigger
+
+The `cron` and `note` values are documentation — they let you see the intended
+cadence next to the branch. **The wrapper's `schedules:` block is authoritative**
+and must mirror them. Changing `cron` in the config alone changes nothing.
+
+If that duplication becomes a problem, the fix is a small generator script that
+rewrites each wrapper's `schedules:` block from the config and is run on commit.
+Worth it above roughly 20–30 schedules; below that, mirroring two lines is
+cheaper than owning a generator.
 
 Also, a scheduled run uses **parameter defaults**. That is why
 `useConfigProducts` defaults to `true` and `envInstance` has a default — without

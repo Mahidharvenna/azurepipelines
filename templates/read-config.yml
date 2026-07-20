@@ -71,6 +71,34 @@ stages:
             exit 1
           }
 
+          # --- Schedule gate -------------------------------------------------
+          # A scheduled run honours "schedule.enabled". Manual runs ignore it,
+          # so you can always deploy on demand even while the schedule is paused.
+          # (The cron itself lives in the wrapper YAML -- ADO resolves schedules
+          # at compile time and cannot read this file. The "cron" value here is
+          # a human-readable record that must mirror the wrapper.)
+          $isScheduled = "$(Build.Reason)" -eq 'Schedule'
+          $sched = $envCfg.schedule
+          $schedEnabled = $true
+          if ($null -ne $sched -and $null -ne $sched.enabled) { $schedEnabled = [bool]$sched.enabled }
+
+          if ($null -ne $sched) {
+            $cronText = $sched.cron
+            $noteText = $sched.note
+            Write-Host ("Schedule       : enabled={0}  cron='{1}'  {2}" -f $schedEnabled, $cronText, $noteText)
+          }
+
+          if ($isScheduled -and -not $schedEnabled) {
+            Write-Host "===================================================="
+            Write-Host "Scheduled run for '$envLabel' is DISABLED in config/branches.json."
+            Write-Host "Nothing will be built or deployed. Flip schedule.enabled to true to resume."
+            Write-Host "===================================================="
+            foreach ($comp in 'pc','bc','cc','cm') {
+              Write-Host "##vso[task.setvariable variable=run_$comp;isOutput=true]false"
+            }
+            exit 0
+          }
+
           $defaultBranch = $envCfg.branch
           if ([string]::IsNullOrWhiteSpace($defaultBranch)) {
             Write-Error "Env '$envLabel' has no 'branch' value in config/branches.json."
