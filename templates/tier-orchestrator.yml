@@ -53,6 +53,14 @@ resources:
 
 variables:
 - group: 'deployment-secrets'
+# NOTE on envName below: classic releases write the tracking-DB StageName from
+# the built-in $(Release.EnvironmentName) -- i.e. the release STAGE name, which
+# is formatted "<COMP> - <ENV>" (spaces around the hyphen, e.g. "PC - UAT1").
+# YAML has no equivalent variable, so we pass the string explicitly and it MUST
+# match, or the post-deploy lookup misses the existing row, reports
+# "SourceBranch Changed" on every run, and inserts a duplicate key into a table
+# shared by every environment. Confirm your exact format from a release
+# breadcrumb before first use.
 # One CATALINA_BASE per centre -- these are NOT uniform. PC and BC use the
 # default install; CC and CM each live in their own Tomcat. Verify against a
 # classic deploy log before changing: the "Copy Latest war file to Server"
@@ -140,7 +148,7 @@ stages:
       comp: pc
       env: ${{ parameters.envTier }}
       envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
-      envName: 'PC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+      envName: 'PC - ${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
       sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-PC'
       catalinaBase: $(catalinaBasePC)
       artifactName: 'pc-drop'
@@ -152,7 +160,7 @@ stages:
       comp: bc
       env: ${{ parameters.envTier }}
       envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
-      envName: 'BC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+      envName: 'BC - ${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
       sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-BC'
       catalinaBase: $(catalinaBaseBC)
       artifactName: 'bc-drop'
@@ -164,7 +172,7 @@ stages:
       comp: cc
       env: ${{ parameters.envTier }}
       envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
-      envName: 'CC-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+      envName: 'CC - ${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
       sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-CC'
       catalinaBase: $(catalinaBaseCC)                            # CC has its own Tomcat
       artifactName: 'cc-drop'
@@ -177,7 +185,7 @@ stages:
       comp: ab                                                   # legacy CM mapping
       env: ${{ parameters.envTier }}
       envLabel: '${{ parameters.envTier }}${{ parameters.envInstance }}'
-      envName: 'CM-${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+      envName: 'CM - ${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
       sshConnection: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}-CM'
       catalinaBase: $(catalinaBaseCM)                            # /opt/tomcat-cm/apache-tomcat
       artifactName: 'cm-drop'                                    # built from CM repo
