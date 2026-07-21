@@ -261,23 +261,57 @@ jobs:
             failOnStdErr: true
             inline: |
               case "${{ parameters.comp }}" in
-                pc) gwruser_dbpass="$(pc_userpass)" ;;
-                bc) gwruser_dbpass="$(bc_userpass)" ;;
-                cc) gwruser_dbpass="$(cc_userpass)" ;;
-                ab) gwruser_dbpass="$(ab_userpass)" ;;
+                pc)
+                  gwruser_dbpass="$(pc_userpass)"
+                  ;;
+                bc)
+                  gwruser_dbpass="$(bc_userpass)"
+                  ;;
+                cc)
+                  gwruser_dbpass="$(cc_userpass)"
+                  ;;
+                ab)
+                  gwruser_dbpass="$(ab_userpass)"
+                  ;;
               esac
-              BASE_DIR=${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}/modules/configuration
-              for f in \
-                "$BASE_DIR/gsrc/pmt/pc/ext/DBintegration/config/DBintegration.properties" \
-                "$BASE_DIR/gsrc/ext/DBintegration/config/DBintegration.properties" \
-                "$BASE_DIR/gsrc/pmt/pc/configuration/config/pmt.properties" \
-                "$BASE_DIR/config/integrationext/integration_ext.properties" \
-                "$BASE_DIR/config/integrationext/integration/config/pmt.properties" ; do
-                if [ -f "$f" ]; then sed -i "s/guidewire/$gwruser_dbpass/g" "$f"; fi
-              done
-              if [ -f "$BASE_DIR/config/database-config.xml" ]; then
-                sed -i "s/Password=[^=]*/Password=$gwruser_dbpass/" "$BASE_DIR/config/database-config.xml"
-              fi
+
+              BASE_DIR="${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}/modules/configuration"
+
+              # The character class MUST be [^;"]*. The password sits inside a
+              # JDBC URL attribute, so the match has to stop at the ';' or '"'
+              # that terminates it. A broader class such as [^=]* runs past the
+              # closing quote, destroys the attribute, and the XML parser then
+              # swallows the next element's '<' -- surfacing much later as
+              #   SAXParseException: jdbc-url must not contain the '<' character
+              # with PolicyCenter unable to start.
+              #
+              # The '"$var"' quoting is also deliberate: it keeps the regex
+              # literal while still interpolating the password safely.
+              sed -i 's/Password=[^;"]*/Password='"$gwruser_dbpass"'/' "$BASE_DIR/config/database-config.xml"
+
+              # Property files are per centre -- do not apply one centre's list
+              # to another, since s/guidewire/<pass>/g is a blunt global replace.
+              case "${{ parameters.comp }}" in
+                pc)
+                  if [ -f "$BASE_DIR/gsrc/ext/DBintegration/config/DBintegration.properties" ]; then
+                    sed -i 's/guidewire/'"$gwruser_dbpass"'/g' "$BASE_DIR/gsrc/ext/DBintegration/config/DBintegration.properties"
+                  fi
+
+                  if [ -f "$BASE_DIR/gsrc/pmt/pc/configuration/config/pmt.properties" ]; then
+                    sed -i 's/guidewire/'"$gwruser_dbpass"'/g' "$BASE_DIR/gsrc/pmt/pc/configuration/config/pmt.properties"
+                  fi
+                  ;;
+                cc)
+                  if [ -f "$BASE_DIR/config/integrationext/integration_ext.properties" ]; then
+                    sed -i 's/guidewire/'"$gwruser_dbpass"'/g' "$BASE_DIR/config/integrationext/integration_ext.properties"
+                  fi
+                  ;;
+                bc)
+                  if [ -f "$BASE_DIR/gsrc/ext/DBintegration/config/DBintegration.properties" ]; then
+                    sed -i 's/guidewire/'"$gwruser_dbpass"'/g' "$BASE_DIR/gsrc/ext/DBintegration/config/DBintegration.properties"
+                  fi
+                  ;;
+              esac
             readyTimeout: '20000'
 
         # --- 11. Remove prod mail domains from ScriptParameters.xml ---
