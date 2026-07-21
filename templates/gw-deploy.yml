@@ -53,6 +53,12 @@ parameters:
 - name: maxCommitAuthor
   type: number
   default: 50
+- name: configComp              # comp as named in config (CM deploys as 'ab')
+  type: string
+  default: ''
+- name: shaExpr                 # runtime expression -> branch head SHA (from ReadConfig)
+  type: string
+  default: ''
 
 jobs:
 - deployment: Deploy_${{ upper(parameters.comp) }}
@@ -63,6 +69,7 @@ jobs:
     name: ${{ parameters.poolName }}
   variables:
     releaseBranch: ${{ parameters.branchExpr }}   # resolves at runtime from ReadConfig
+    deployedSha:   ${{ parameters.shaExpr }}      # branch head that this run deploys
   strategy:
     runOnce:
       deploy:
@@ -71,7 +78,7 @@ jobs:
         # Note: DownloadBuildArtifacts@1 is not available on ADO Server 2022 RTW;
         # use @0 which has been stable on-prem for years.
         - task: DownloadBuildArtifacts@0
-          displayName: 'Download ${{ parameters.artifactName }}'
+          displayName: 'Prep 1/2  Download ${{ parameters.artifactName }}'
           inputs:
             buildType: 'current'
             downloadType: 'single'
@@ -81,7 +88,7 @@ jobs:
         # Fail here -- before anything on the server is touched -- if the WAR
         # is not where we expect. Cheap insurance against a half-applied deploy.
         - task: PowerShell@2
-          displayName: 'Verify WAR present in artifact'
+          displayName: 'Prep 2/2  Verify WAR present in artifact'
           inputs:
             targetType: inline
             errorActionPreference: stop
@@ -99,7 +106,7 @@ jobs:
 
         # --- 1. Pre-deployment: insert "Started" row in the tracking DB ---
         - task: PowerShell@2
-          displayName: 'Pre-Deployment - Update deployment-tracking DB'
+          displayName: ' 1/16  Pre-deployment DB record'
           inputs:
             targetType: inline
             errorActionPreference: stop
@@ -169,7 +176,7 @@ jobs:
 
         # --- 2. Shutdown Guidewire ---
         - task: SSH@0
-          displayName: 'Shutdown the Guidewire Service'
+          displayName: ' 2/16  Shutdown Guidewire'
           continueOnError: true
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
@@ -181,7 +188,7 @@ jobs:
 
         # --- 3. Trim catalina.out ---
         - task: SSH@0
-          displayName: 'Trimming catalina.out'
+          displayName: ' 3/16  Trim catalina.out'
           continueOnError: true
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
@@ -201,7 +208,7 @@ jobs:
 
         # --- 4. Delete log files older than 60 days (skip for ab) ---
         - task: SSH@0
-          displayName: 'Delete log files older than 60 days'
+          displayName: ' 4/16  Delete logs older than 60 days'
           continueOnError: true
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
@@ -217,7 +224,7 @@ jobs:
 
         # --- 5. Delete war files older than 5 days ---
         - task: SSH@0
-          displayName: 'Delete war files older than 5 days'
+          displayName: ' 5/16  Delete WARs older than 5 days'
           continueOnError: true
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
@@ -230,7 +237,7 @@ jobs:
 
         # --- 6. Backup existing WAR ---
         - task: SSH@0
-          displayName: 'Take a Backup of existing war file if present'
+          displayName: ' 6/16  Back up existing WAR'
           continueOnError: true
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
@@ -259,7 +266,7 @@ jobs:
         # 'cm-drop' built from the CM repo. If your CM build emits 'cm.war'
         # instead, this fails loudly here rather than half-deploying.
         - task: CopyFilesOverSSH@0
-          displayName: 'Copy Latest war file to Server'
+          displayName: ' 7/16  Copy WAR to server'
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
             sourceFolder: '$(Pipeline.Workspace)/${{ parameters.artifactName }}'
@@ -275,7 +282,7 @@ jobs:
 
         # --- 8. Remove old extracted webapp dir ---
         - task: SSH@0
-          displayName: 'Delete the existing deployed webapps location'
+          displayName: ' 8/16  Remove old webapp directory'
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
             runOptions: commands
@@ -284,7 +291,7 @@ jobs:
 
         # --- 9. Unzip new WAR ---
         - task: SSH@0
-          displayName: 'Extract newly deployed war file'
+          displayName: ' 9/16  Extract new WAR'
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
             runOptions: commands
@@ -293,7 +300,7 @@ jobs:
 
         # --- 10. Replace GWR user password in config files ---
         - task: SSH@0
-          displayName: 'Replace GWR user Password'
+          displayName: '10/16  Patch runtime DB password'
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
             runOptions: inline
@@ -364,7 +371,7 @@ jobs:
         # `-e 's/@domain//g'`. The trailing cat echoes the result to the log so
         # you can confirm the addresses were neutralised.
         - task: SSH@0
-          displayName: 'Remove prod mail id from ScriptParameters.xml'
+          displayName: '11/16  Strip prod mail domains'
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
             runOptions: inline
@@ -377,7 +384,7 @@ jobs:
 
         # --- 12. Update log dir in log4j2.xml ---
         - task: SSH@0
-          displayName: 'Update the log directory to ${{ parameters.env }}'
+          displayName: '12/16  Point logs at ${{ parameters.env }}'
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
             runOptions: inline
@@ -393,7 +400,7 @@ jobs:
 
         # --- 13. Start Guidewire ---
         - task: SSH@0
-          displayName: 'Start the Guidewire Service'
+          displayName: '13/16  Start Guidewire'
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
             runOptions: inline
@@ -404,7 +411,7 @@ jobs:
 
         # --- 14. Dump last 500 log lines on failure ---
         - task: SSH@0
-          displayName: 'Display last 500 lines of Application log (on failure)'
+          displayName: '14/16  Dump app log (on failure)'
           condition: failed()
           inputs:
             sshEndpoint: ${{ parameters.sshConnection }}
@@ -417,7 +424,7 @@ jobs:
 
         # --- 15. Post-deployment: write commits + final status to the tracking DB ---
         - task: PowerShell@2
-          displayName: 'Post-Deployment - Update deployment-tracking DB'
+          displayName: '15/16  Post-deployment DB record'
           condition: always()
           env:
             SYSTEM_ACCESSTOKEN: $(System.AccessToken)
@@ -545,3 +552,34 @@ jobs:
                   CurrentBuildID = '$(Build.BuildId)'
               WHERE StageName    = '${{ parameters.envName }}'
               "@
+
+        # --- 16. Record the deployed commit -----------------------------------
+        # Tags this build <ENV>-<comp>-<sha8>. ReadConfig looks for that tag on a
+        # previous successful run to decide whether anything actually changed, so
+        # this is what makes "no changes since last deployment" work. Tagging is
+        # best-effort: a failure here must not fail a good deployment.
+        - task: PowerShell@2
+          displayName: '16/16  Record deployed commit'
+          condition: succeeded()
+          continueOnError: true
+          env:
+            SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          inputs:
+            targetType: inline
+            script: |
+              $sha = "$(deployedSha)"
+              if ([string]::IsNullOrWhiteSpace($sha) -or $sha.Length -lt 8) {
+                Write-Host "No commit SHA resolved for this run -- nothing to tag."
+                Write-Host "(Change detection is only active when skipIfUnchanged is set on the env.)"
+                exit 0
+              }
+              $comp = '${{ parameters.configComp }}'
+              if ([string]::IsNullOrWhiteSpace($comp)) { $comp = '${{ parameters.comp }}' }
+              $tag = "${{ upper(parameters.envLabel) }}-$comp-" + $sha.Substring(0, 8)
+              $url = "$(System.CollectionUri)$(System.TeamProject)/_apis/build/builds/$(Build.BuildId)/tags/$tag?api-version=6.0"
+              try {
+                Invoke-RestMethod -Uri $url -Method Put -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" } | Out-Null
+                Write-Host "Tagged this build '$tag' -- a later run on the same commit will skip."
+              } catch {
+                Write-Host "##vso[task.logissue type=warning]Could not tag the build ($_). Change detection will re-deploy this commit next time."
+              }

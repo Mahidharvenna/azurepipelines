@@ -39,13 +39,16 @@ parameters:
   type: boolean
 - name: deployCM
   type: boolean
+- name: forceRebuild             # true = ignore change detection and run anyway
+  type: boolean
+  default: false
 - name: poolName
   type: string
   default: Default
 
 stages:
 - stage: ReadConfig
-  displayName: 'Resolve branches + products from config'
+  displayName: '🔍  Resolve configuration'
   jobs:
   - job: Read
     displayName: 'Parse branches.json'
@@ -54,7 +57,9 @@ stages:
     steps:
     - checkout: self             # the repo holding config/branches.json
     - task: PowerShell@2
-      name: cfg                  # step name -> output var prefix (cfg.branch_pc, cfg.run_pc)
+      name: cfg
+      env:
+        SYSTEM_ACCESSTOKEN: $(System.AccessToken)                  # step name -> output var prefix (cfg.branch_pc, cfg.run_pc)
       displayName: 'Resolve config for ${{ parameters.envLabel }}'
       inputs:
         targetType: inline
@@ -149,7 +154,54 @@ stages:
           Write-Host "Teams notify   : $notifyEnabled  (webhook from variable '$notifyVar')"
           Write-Host "----------------------------------------------------"
 
-          $anyRun = $false
+          # --- Change detection -------------------------------------------
+          # Skip a centre whose branch head has already been deployed to this
+          # env. The record is a build TAG (<ENV>-<comp>-<sha8>), so nothing is
+          # stored outside ADO and no schema change is needed.
+          $skipUnchanged = $false
+          if ($null -ne $envCfg.skipIfUnchanged) { $skipUnchanged = [bool]$envCfg.skipIfUnchanged }
+          $force = "${{ parameters.forceRebuild }}".ToLower() -eq 'true'
+          if ($skipUnchanged -and $force) {
+            Write-Host "Change detection: BYPASSED (forceRebuild ticked)"
+          } elseif ($skipUnchanged) {
+            Write-Host "Change detection: ON  (a centre is skipped if its branch head is already deployed here)"
+          } else {
+            Write-Host "Change detection: off (set skipIfUnchanged: true on this env to enable)"
+          }
+
+          $collection = "$(System.CollectionUri)"
+          $project    = "$(System.TeamProject)"
+          $hdr        = @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
+
+          function Get-BranchSha {
+            param([string]$Repo, [string]$Branch)
+            $f = [uri]::EscapeDataString("heads/$Branch")
+            $u = "$collection$project/_apis/git/repositories/$Repo/refs?filter=$f&api-version=6.0"
+            try {
+              $r = Invoke-RestMethod -Uri $u -Headers $hdr -Method Get
+              if ($r.value.Count -gt 0) { return $r.value[0].objectId }
+              Write-Host "  (branch '$Branch' not found in repo '$Repo')"
+            } catch {
+              Write-Host "  (could not resolve SHA for $Repo/$Branch -- $_)"
+            }
+            return $null
+          }
+
+          function Test-AlreadyDeployed {
+            param([string]$Tag)
+            $u = "$collection$project/_apis/build/builds?definitions=$(System.DefinitionId)&tagFilters=$Tag&resultFilter=succeeded&`$top=1&api-version=6.0"
+            try {
+              $r = Invoke-RestMethod -Uri $u -Headers $hdr -Method Get
+              return ($r.count -gt 0)
+            } catch {
+              # Never block a deploy because the lookup failed.
+              Write-Host "  (tag lookup failed, proceeding -- $_)"
+              return $false
+            }
+          }
+
+          $anyRun  = $false
+          $skipped = @()
           foreach ($comp in 'pc','bc','cc','cm') {
 
             if ($products -notcontains $comp) {
@@ -175,6 +227,21 @@ stages:
           }
 
           Write-Host "----------------------------------------------------"
+
+          if (-not $anyRun -and $skipped.Count -gt 0) {
+            $list = $skipped -join ', '
+            Write-Host "##vso[task.logissue type=warning]No changes to deploy: $list already running the latest commit on $envLabel. Nothing was built or deployed."
+            Write-Host ""
+            Write-Host "  Every configured centre is already up to date."
+            Write-Host "  Tick 'Force rebuild' at queue time to deploy the same commit again."
+            Write-Host ""
+            exit 0
+          }
+
+          if ($skipped.Count -gt 0) {
+            Write-Host "##vso[task.logissue type=warning]Skipped (already deployed): $($skipped -join ', ')"
+          }
+
           if (-not $anyRun) {
             Write-Error "Nothing to deploy for '$envLabel'. Either untick 'useConfigProducts' and tick a product, or check the config."
             exit 1

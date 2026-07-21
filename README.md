@@ -70,8 +70,41 @@ branch** plus the centres in that release:
 |---|---|
 | `overrides` | `{"bc": "feature/x"}` — one centre on a different branch |
 | `genDataDictionary` | `true` — run `gwb.bat genDataDictionary` for this env (adds several minutes per centre) |
+| `skipIfUnchanged` | `true` — skip a centre whose branch head is already deployed here |
 | `schedule.enabled` | `false` — a scheduled run stands down; **manual runs still work** |
 | `schedule.cron` / `.note` | documentation only — see below |
+
+## Skipping unchanged deployments
+
+Set `skipIfUnchanged: true` on an env and each centre is checked before anything
+builds:
+
+```json
+"DEV1": {
+  "branch": "maintenance/rel-2026.06",
+  "products": ["pc"],
+  "skipIfUnchanged": true
+}
+```
+
+ReadConfig resolves the branch head via the Git REST API and looks for a build
+tag `<ENV>-<comp>-<sha8>` on a previous **successful** run. If it finds one, that
+commit is already live and the centre is skipped:
+
+```
+PC  : maintenance/rel-2026.06 -> run=False  [unchanged since last deployment: a1b2c3d4]
+----------------------------------------------------
+  Every configured centre is already up to date.
+  Tick 'Force rebuild' at queue time to deploy the same commit again.
+```
+
+The run ends green with a warning on the summary rather than burning ~20 minutes
+rebuilding identical code. Tick **Force rebuild** to override.
+
+The record is a build tag, so nothing lives outside ADO and no schema change is
+needed. Tagging is best-effort — if it fails, the next run simply redeploys.
+Note this compares the *branch head*, not what the build produced: an unchanged
+branch with a changed `gw-core` on the agent would still be skipped.
 
 ## Manual vs scheduled runs
 

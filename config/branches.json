@@ -12,7 +12,8 @@
     "notify": {
       "enabled": false,
       "webhookVar": "TEAMS_WEBHOOK_DEV"
-    }
+    },
+    "skipIfUnchanged": true
   },
   "DEV2": {
     "branch": "maintenance/rel-2026.06",

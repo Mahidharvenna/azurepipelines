@@ -30,7 +30,7 @@ parameters:
 
 jobs:
 - job: Build_${{ upper(parameters.comp) }}
-  displayName: '${{ upper(parameters.comp) }} Build'
+  displayName: '${{ upper(parameters.comp) }}'
   condition: ${{ parameters.runCondition }}
   pool:
     name: ${{ parameters.poolName }}
@@ -57,17 +57,17 @@ jobs:
       git checkout $(releaseBranch)
       git log -1 --oneline
     workingDirectory: '$(Build.Repository.LocalPath)'
-    displayName: 'Switch to configured release branch'
+    displayName: '1/7  Switch to configured release branch'
 
   - task: CopyFiles@2
-    displayName: 'Copy GW core to: $(Build.Repository.LocalPath)'
+    displayName: '2/7  Copy Guidewire core'
     inputs:
       SourceFolder: 'C:\path\to\gw-core\${{ upper(parameters.comp) }}'
       Contents: '**'
       TargetFolder: '$(Build.Repository.LocalPath)'
 
   - task: CmdLine@2
-    displayName: 'Run: gwb.bat clean'
+    displayName: '3/7  gwb.bat clean'
     inputs:
       workingDirectory: '$(Build.Repository.LocalPath)'
       script: 'gwb.bat clean'
@@ -75,14 +75,14 @@ jobs:
   # PC-only: remove example Jurisdiction file (tolerant if missing)
   - ${{ if eq(parameters.comp, 'pc') }}:
     - task: CmdLine@2
-      displayName: 'Remove Jurisdiction.example.ttx'
+      displayName: '3b/7 Remove Jurisdiction.example.ttx (PC only)'
       inputs:
         script: >
           if exist "$(Build.Repository.LocalPath)\modules\configuration\config\extensions\typelist\Jurisdiction.example.ttx"
           del "$(Build.Repository.LocalPath)\modules\configuration\config\extensions\typelist\Jurisdiction.example.ttx"
 
   - task: CmdLine@2
-    displayName: 'Run: gwb.bat webResources'
+    displayName: '4/7  gwb.bat webResources'
     inputs:
       workingDirectory: '$(Build.Repository.LocalPath)'
       script: 'gwb.bat webResources'
@@ -92,20 +92,20 @@ jobs:
   # config/branches.json -- the step is always defined but skips otherwise.
   # Position matches the classic PC build (after webResources, before the WAR).
   - task: CmdLine@2
-    displayName: 'Run: gwb.bat genDataDictionary'
+    displayName: '4b/7 gwb.bat genDataDictionary (opt-in)'
     condition: and(succeeded(), eq(variables['genDataDictionary'], 'true'))
     inputs:
       workingDirectory: '$(Build.Repository.LocalPath)'
       script: 'gwb.bat genDataDictionary'
 
   - task: CmdLine@2
-    displayName: 'Run: gwb.bat warTomcatDBCP'
+    displayName: '5/7  gwb.bat warTomcatDBCP'
     inputs:
       workingDirectory: '$(Build.Repository.LocalPath)'
       script: 'gwb.bat warTomcatDBCP'
 
   - task: CopyFiles@2
-    displayName: 'Copy WAR files to staging'
+    displayName: '6/7  Stage WAR'
     condition: succeededOrFailed()
     inputs:
       SourceFolder: '$(Build.SourcesDirectory)'
@@ -117,7 +117,7 @@ jobs:
   # inside the artifact. The deploy globs for it, but this makes the layout
   # visible in the log instead of something you discover at startup.
   - task: PowerShell@2
-    displayName: 'Show staged artifact layout'
+    displayName: '6b/7 Show staged artifact layout'
     condition: succeededOrFailed()
     inputs:
       targetType: inline
@@ -138,7 +138,7 @@ jobs:
   # NOTE: PublishPipelineArtifact@1 is NOT supported on ADO Server (on-prem).
   # Using the older PublishBuildArtifacts@1 task instead -- same outcome.
   - task: PublishBuildArtifacts@1
-    displayName: 'Publish Artifact: ${{ parameters.comp }}-drop'
+    displayName: '7/7  Publish ${{ parameters.comp }}-drop'
     condition: succeededOrFailed()
     inputs:
       PathtoPublish: '$(Build.ArtifactStagingDirectory)'

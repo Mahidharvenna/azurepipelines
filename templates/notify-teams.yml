@@ -29,7 +29,7 @@ parameters:
 
 stages:
 - stage: Notify
-  displayName: 'Notify Teams'
+  displayName: '📣  Notify'
   dependsOn:
   - ReadConfig
   - Build

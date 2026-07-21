@@ -29,6 +29,9 @@ parameters:
 - name: notifyTeams          # false = Notify stage is present but skipped
   type: boolean
   default: false
+- name: forceRebuild         # true = deploy even if the commit is already live
+  type: boolean
+  default: false
 - name: dbSchema             # SQL schema owning the tracking tables (dbo, or your own)
   type: string
   default: 'dbo'
@@ -92,6 +95,7 @@ stages:
     deployBC: ${{ parameters.deployBC }}
     deployCC: ${{ parameters.deployCC }}
     deployCM: ${{ parameters.deployCM }}
+    forceRebuild: ${{ parameters.forceRebuild }}
     poolName: ${{ parameters.poolName }}
 
 # --------------------------------------------------------------------------
@@ -99,7 +103,7 @@ stages:
 # said so (run_<comp> = true). Skipped products show as "skipped", not missing.
 # --------------------------------------------------------------------------
 - stage: Build
-  displayName: 'Build configured products'
+  displayName: '🔨  Build'
   dependsOn: ReadConfig
   jobs:
   - template: gw-build.yml
@@ -141,7 +145,7 @@ stages:
 # depends on ReadConfig (branch + run vars) AND Build (artifacts).
 # --------------------------------------------------------------------------
 - stage: Deploy
-  displayName: 'Deploy to ${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
+  displayName: '🚀  Deploy to ${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
   dependsOn:
   - ReadConfig
   - Build
@@ -156,6 +160,8 @@ stages:
       catalinaBase: $(catalinaBasePC)
       artifactName: 'pc-drop'
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_pc'] ]
+      shaExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.sha_pc'] ]
+      configComp: pc
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_pc'], 'true'))
       poolName: ${{ parameters.poolName }}
       dbSchema: ${{ parameters.dbSchema }}
@@ -169,6 +175,8 @@ stages:
       catalinaBase: $(catalinaBaseBC)
       artifactName: 'bc-drop'
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_bc'] ]
+      shaExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.sha_bc'] ]
+      configComp: bc
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_bc'], 'true'))
       poolName: ${{ parameters.poolName }}
       dbSchema: ${{ parameters.dbSchema }}
@@ -182,6 +190,8 @@ stages:
       catalinaBase: $(catalinaBaseCC)                            # CC has its own Tomcat
       artifactName: 'cc-drop'
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cc'] ]
+      shaExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.sha_cc'] ]
+      configComp: cc
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cc'], 'true'))
       poolName: ${{ parameters.poolName }}
       dbSchema: ${{ parameters.dbSchema }}
@@ -196,6 +206,8 @@ stages:
       catalinaBase: $(catalinaBaseCM)                            # /opt/tomcat-cm/apache-tomcat
       artifactName: 'cm-drop'                                    # built from CM repo
       branchExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_cm'] ]
+      shaExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.sha_cm'] ]
+      configComp: cm                                             # tag under 'cm', not 'ab'
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cm'], 'true'))
       poolName: ${{ parameters.poolName }}
       dbSchema: ${{ parameters.dbSchema }}

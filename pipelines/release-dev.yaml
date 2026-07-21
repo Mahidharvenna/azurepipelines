@@ -56,6 +56,11 @@ parameters:
 
 # Teams notification. Off until a TEAMS_WEBHOOK is added to the variable group;
 # the Notify stage still appears in the run, marked skipped.
+- name: forceRebuild
+  displayName: 'Force rebuild (deploy even if the commit is already live)'
+  type: boolean
+  default: false
+
 - name: notifyTeams
   displayName: 'Post a summary to Teams'
   type: boolean
@@ -73,4 +78,5 @@ extends:
     deployBC: ${{ parameters.deployBC }}
     deployCC: ${{ parameters.deployCC }}
     deployCM: ${{ parameters.deployCM }}
+    forceRebuild: ${{ parameters.forceRebuild }}
     notifyTeams: ${{ parameters.notifyTeams }}
