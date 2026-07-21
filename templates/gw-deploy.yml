@@ -35,6 +35,24 @@ parameters:
 - name: dbSchema                # SQL schema owning the tracking tables
   type: string
   default: 'dbo'
+# Column widths for the tracking tables. A YAML pipeline has no Release.*
+# variables, so these values come from Build.* and run longer than the classic
+# release equivalents -- cap them rather than letting SQL reject the statement.
+- name: maxReleaseName
+  type: number
+  default: 50
+- name: maxBuildName
+  type: number
+  default: 50
+- name: maxSourceBranch
+  type: number
+  default: 50
+- name: maxCommitInfo
+  type: number
+  default: 500
+- name: maxCommitAuthor
+  type: number
+  default: 50
 
 jobs:
 - deployment: Deploy_${{ upper(parameters.comp) }}
@@ -107,9 +125,31 @@ jobs:
                   $connection.Open()
                   if ($ReturnData) { return $command.ExecuteScalar() }
                   else { $command.ExecuteNonQuery() | Out-Null }
-                } catch { Write-Host "SQL error: $_"; exit 1 }
-                finally { $connection.Close() }
+                } catch {
+                  Write-Host "SQL error: $_"
+                  Write-Host "--- failing statement ---"
+                  Write-Host $Query
+                  Write-Host "-------------------------"
+                  exit 1
+                } finally { $connection.Close() }
               }
+
+              # Same capping as the post-deploy step -- a YAML pipeline's Build.*
+              # values are wider than the classic Release.* ones these columns
+              # were sized for.
+              function Trunc {
+                param([string]$Value, [int]$Max, [string]$Label)
+                if ($null -eq $Value) { return '' }
+                if ($Value.Length -gt $Max) {
+                  Write-Host "##vso[task.logissue type=warning]$Label truncated from $($Value.Length) to $Max chars."
+                  return $Value.Substring(0, $Max)
+                }
+                return $Value
+              }
+
+              $relName   = Trunc '$(Build.BuildNumber)'   ${{ parameters.maxReleaseName }}  'ReleaseName'
+              $buildName = Trunc '$(Build.DefinitionName)' ${{ parameters.maxBuildName }}    'BuildName'
+              $branchVal = Trunc $branchShort              ${{ parameters.maxSourceBranch }} 'SourceBranch'
 
               $previousBuildID = ExecuteSqlQuery -ConnectionString $connectionString `
                 -Query "SELECT CurrentBuildID from $currentBuildTableName where StageName = '${{ parameters.envName }}'" `
@@ -124,7 +164,7 @@ jobs:
 
               ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               INSERT INTO $releaseNotesLogTableName (BuildName, SourceBranch, PreviousBuildID, ReleaseName, RunName, StageName, Attempt, Status)
-              VALUES ('$(Build.DefinitionName)', '$branchShort', '$previousBuildID', '$(Build.BuildNumber)', '$(Build.BuildNumber)', '${{ parameters.envName }}', '$(System.JobAttempt)', 'Started')
+              VALUES ('$buildName', '$branchVal', '$previousBuildID', '$relName', '$relName', '${{ parameters.envName }}', '$(System.JobAttempt)', 'Started')
               "@
 
         # --- 2. Shutdown Guidewire ---
@@ -408,8 +448,39 @@ jobs:
                   $connection.Open()
                   if ($ReturnData) { return $command.ExecuteScalar() }
                   else { $command.ExecuteNonQuery() | Out-Null }
-                } catch { Write-Host "SQL error: $_"; exit 1 }
-                finally { $connection.Close() }
+                } catch {
+                  Write-Host "SQL error: $_"
+                  # 'String or binary data would be truncated' means a value is
+                  # wider than its column. Echo the statement so the offending
+                  # value is visible instead of having to guess.
+                  Write-Host "--- failing statement ---"
+                  Write-Host $Query
+                  Write-Host "-------------------------"
+                  exit 1
+                } finally { $connection.Close() }
+              }
+
+              # A YAML pipeline has no Release.* variables, so the values written
+              # here come from Build.* and are materially longer than the classic
+              # release equivalents (e.g. 'MyOrg-DEV1-20260101.2' vs 'DEV1-PC').
+              # Cap them to the column widths rather than letting SQL reject the
+              # whole statement. Adjust to match your schema:
+              #   SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH
+              #   FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='ReleaseNotes';
+              $MAX_RELEASENAME = ${{ parameters.maxReleaseName }}
+              $MAX_BUILDNAME   = ${{ parameters.maxBuildName }}
+              $MAX_BRANCH      = ${{ parameters.maxSourceBranch }}
+              $MAX_COMMITINFO  = ${{ parameters.maxCommitInfo }}
+              $MAX_AUTHOR      = ${{ parameters.maxCommitAuthor }}
+
+              function Trunc {
+                param([string]$Value, [int]$Max, [string]$Label)
+                if ($null -eq $Value) { return '' }
+                if ($Value.Length -gt $Max) {
+                  Write-Host "##vso[task.logissue type=warning]$Label truncated from $($Value.Length) to $Max chars."
+                  return $Value.Substring(0, $Max)
+                }
+                return $Value
               }
 
               function GETCHANGES {
@@ -421,6 +492,10 @@ jobs:
                 $resp = Invoke-WebRequest -Uri $url -Headers $headers -UseBasicParsing
                 return ($resp.Content | ConvertFrom-Json)
               }
+
+              $relName   = Trunc '$(Build.BuildNumber)'   $MAX_RELEASENAME 'ReleaseName'
+              $buildName = Trunc '$(Build.DefinitionName)' $MAX_BUILDNAME   'BuildName'
+              $branchVal = Trunc $branchShort              $MAX_BRANCH      'SourceBranch'
 
               $previousBranch = ExecuteSqlQuery -ConnectionString $connectionString `
                 -Query "SELECT SourceBranch from $currentBuildTableName where StageName = '${{ parameters.envName }}'" `
@@ -435,10 +510,12 @@ jobs:
                 Write-Output "Number of changes = $($PARSED.count)"
                 if ($PARSED.count -gt 0) {
                   foreach ($v in $PARSED.value) {
-                    $msg = $v.message.Replace("'","''")
+                    $msg       = $v.message.Replace("'","''")
+                    $msgVal    = Trunc $msg                       $MAX_COMMITINFO 'CommitInfo'
+                    $authorVal = Trunc $v.author.displayName      $MAX_AUTHOR     'CommitAuthor'
                     ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               INSERT INTO $releaseNotesTableName (ReleaseName, StageName, BuildName, SourceBranch, CommitInfo, CommitAuthor, CommitTimestamp)
-              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '$branchShort', '$msg', '$($v.author.displayName)', '$($v.timestamp)')
+              VALUES ('$relName', '${{ parameters.envName }}', '$buildName', '$branchVal', '$msgVal', '$authorVal', '$($v.timestamp)')
               "@
                   }
                   $finalStatus = 'Completed'
@@ -450,7 +527,7 @@ jobs:
               } else {
                 ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               INSERT INTO $releaseNotesTableName (ReleaseName, StageName, BuildName, SourceBranch, CommitInfo, CommitAuthor, CommitTimestamp)
-              VALUES ('$(Build.BuildNumber)', '${{ parameters.envName }}', '$(Build.DefinitionName)', '$branchShort', 'SourceBranch Changed', 'NA', 'NA')
+              VALUES ('$relName', '${{ parameters.envName }}', '$buildName', '$branchVal', 'SourceBranch Changed', 'NA', 'NA')
               "@
                 $finalStatus = 'SourceBranch Changed'
               }
@@ -458,13 +535,13 @@ jobs:
               ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               UPDATE $releaseNotesLogTableName SET Status = '$finalStatus'
               WHERE ReleaseName = '${{ parameters.envName }}'
-                AND RunName     = '$(Build.BuildNumber)'
+                AND RunName     = '$relName'
                 AND Attempt     = '$(System.JobAttempt)'
               "@
 
               ExecuteSqlQuery -ConnectionString $connectionString -Query @"
               UPDATE $currentBuildTableName
-              SET SourceBranch   = '$branchShort',
+              SET SourceBranch   = '$branchVal',
                   CurrentBuildID = '$(Build.BuildId)'
               WHERE StageName    = '${{ parameters.envName }}'
               "@
