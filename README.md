@@ -139,6 +139,17 @@ wrapper and change the default `envInstance` and cron.
 
 ### 1. Replace the placeholders
 
+The templates ship with placeholders so they can live in a shared repo. Rather
+than redoing these edits by hand on every update, fill in the CONFIG block in
+**`apply-local-config.ps1`** once and run it after each pull:
+
+```powershell
+pwsh -File apply-local-config.ps1
+```
+
+It reports any placeholder it could not find, so a missed substitution surfaces
+immediately instead of reaching a deploy. The table below is what it sets.
+
 | Placeholder | Replace with |
 |---|---|
 | `MyOrg` (build-number prefix, REST project name in `gw-deploy.yml`) | your project name |
