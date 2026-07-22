@@ -68,7 +68,11 @@ $FilePrefix   = Get-EnvOr 'REPORT_FILE_PREFIX' 'gw-logins'
 # Per-user detail. The username has to be pulled out of the log line, and that
 # format is site-specific -- set LOGIN_USER_REGEX with a named group 'user'.
 # The default covers "User Login: jdoe" / "User Login jdoe" / "User Login=jdoe".
-# The run prints sample lines, so the first report shows you what to match.
+# Columnar logs -- where the username is simply the nth field rather than text
+# following a keyword -- need a positional pattern instead, e.g.
+#   field 2:  ^\s*\S+\s+(?<user>\S+)
+# The run prints sample lines broken into numbered fields, so the first report
+# tells you which to use.
 $IncludeUsers  = Get-EnvBool 'INCLUDE_USER_DETAIL' $true
 $UserRegex     = Get-EnvOr 'LOGIN_USER_REGEX' '(?i)User\s+Login\s*[:=\-]?\s*(?<user>[A-Za-z0-9._\\@-]+)'
 $LogLimit      = [int](Get-EnvOr 'LOKI_LOG_LIMIT' '5000')   # Loki's per-query entry cap
@@ -231,8 +235,10 @@ function Get-LoginEvents {
             for ($i = 0; $i -lt $show; $i++) { $hint += "[$($i + 1)] $($fields[$i])" }
             Write-Host "      fields: $($hint -join '   ')"
         }
-        Write-Host "  If the username is field N, set:  LOGIN_USER_REGEX = ^(\S+\s+){N-1}(?<user>\S+)"
-        Write-Host "  e.g. field 2 -> ^\S+\s+(?<user>\S+)   |   field 3 -> ^(\S+\s+){2}(?<user>\S+)" 
+        Write-Host "  Set LOGIN_USER_REGEX in the variable group to one of these:"
+        Write-Host "    username is field 2 ->  ^\s*\S+\s+(?<user>\S+)"
+        Write-Host "    username is field 3 ->  ^\s*(\S+\s+){2}(?<user>\S+)"
+        Write-Host "    username is field N ->  ^\s*(\S+\s+){N-1}(?<user>\S+)" 
     }
     return $events
 }
