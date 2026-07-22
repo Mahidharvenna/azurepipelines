@@ -547,22 +547,107 @@ Write-Host "Wrote $xlsxPath ($([math]::Round((Get-Item $xlsxPath).Length / 1KB, 
 # ---------------------------------------------------------------------------
 # EMAIL
 # ---------------------------------------------------------------------------
-$items = ''
+# Distinct users are counted with a set, not by summing per-env figures: the
+# same person appearing in two environments must count once in the total.
+$allUsers    = New-Object 'System.Collections.Generic.HashSet[string]'
+$grandLogins = 0
+$rowsHtml    = ''
+$rowIndex    = 0
+
 foreach ($e in $Envs) {
     foreach ($p in $Products) {
-        $items += "<li><b>$e $($ProductMeta[$p].label)</b>: {0:N0} logins</li>" -f $data["$e|$p"].total
+        $d = $data["$e|$p"]
+        $grandLogins += $d.total
+
+        if ($IncludeUsers) {
+            $users = @($d.events | Where-Object { $_.User } | Select-Object -ExpandProperty User -Unique)
+            foreach ($u in $users) { [void]$allUsers.Add($u) }
+            $userCell = '{0:N0}' -f $users.Count
+        } else {
+            $userCell = '&mdash;'
+        }
+
+        $bg = if ($rowIndex % 2 -eq 1) { ' background:#f7f9fc;' } else { '' }
+        $rowsHtml += (
+            "<tr style=`"$bg`">" +
+            "<td style=`"padding:7px 12px;border-bottom:1px solid #e4e8ee;`">$e</td>" +
+            "<td style=`"padding:7px 12px;border-bottom:1px solid #e4e8ee;`">$($ProductMeta[$p].label)</td>" +
+            "<td style=`"padding:7px 12px;border-bottom:1px solid #e4e8ee;text-align:right;`">$('{0:N0}' -f $d.total)</td>" +
+            "<td style=`"padding:7px 12px;border-bottom:1px solid #e4e8ee;text-align:right;`">$userCell</td>" +
+            "</tr>")
+        $rowIndex++
     }
 }
+
+$grandUserCell = if ($IncludeUsers) { '{0:N0}' -f $allUsers.Count } else { '&mdash;' }
+$totalRow =
+    "<tr style=`"font-weight:bold;background:#eef2f8;`">" +
+    "<td style=`"padding:8px 12px;border-top:2px solid #305496;`" colspan=`"2`">TOTAL</td>" +
+    "<td style=`"padding:8px 12px;border-top:2px solid #305496;text-align:right;`">$('{0:N0}' -f $grandLogins)</td>" +
+    "<td style=`"padding:8px 12px;border-top:2px solid #305496;text-align:right;`">$grandUserCell</td>" +
+    "</tr>"
+
+# Busiest users across every environment in the report.
+$topHtml = ''
+if ($IncludeUsers) {
+    $everyEvent = @()
+    foreach ($e in $Envs) { foreach ($p in $Products) { $everyEvent += $data["$e|$p"].events } }
+    $top = @($everyEvent | Where-Object { $_.User } | Group-Object -Property User |
+             Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, Name |
+             Select-Object -First 5)
+    if ($top.Count -gt 0) {
+        $lis = ($top | ForEach-Object {
+            "<li style=`"margin:2px 0;`"><b>$($_.Name)</b> &mdash; $('{0:N0}' -f $_.Count) logins</li>"
+        }) -join ''
+        $topHtml =
+            "<p style=`"margin:22px 0 6px;font-size:13px;color:#333;`"><b>Busiest users</b></p>" +
+            "<ol style=`"margin:0;padding-left:22px;font-size:13px;color:#333;`">$lis</ol>"
+    }
+}
+
+$periodText = "$($start.ToString('d MMM yyyy')) &ndash; $($end.AddDays(-1).ToString('d MMM yyyy'))"
+$sheetNote  = if ($IncludeUsers) { 'Summary, Daily, Users and Detail sheets' } else { 'Summary and Daily sheets' }
+
 $html = @"
-<html><body style="font-family:sans-serif">
-<p>Hi team,</p>
-<p>Attached is the Guidewire login report for <b>$monthLabel</b>.</p>
-<ul>$items</ul>
-<p style="color:#888;font-size:0.85em">
-Source: Loki at $LokiUrl. Match: <code>|= "User Login"</code>.
-Generated $genStamp (automated).
-</p>
-</body></html>
+<html><body style="margin:0;padding:0;background:#ffffff;">
+<div style="font-family:Segoe UI,Helvetica,Arial,sans-serif;max-width:720px;padding:4px 2px;">
+
+  <h2 style="margin:0 0 2px;font-size:19px;color:#1f3864;">Guidewire Login Report</h2>
+  <p style="margin:0 0 18px;font-size:13px;color:#666;">
+    $monthLabel &nbsp;&middot;&nbsp; $periodText &nbsp;&middot;&nbsp; times in $tzLabel
+  </p>
+
+  <table cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;color:#222;min-width:460px;">
+    <thead>
+      <tr style="background:#305496;color:#ffffff;text-align:left;">
+        <th style="padding:8px 12px;font-weight:600;">Environment</th>
+        <th style="padding:8px 12px;font-weight:600;">Centre</th>
+        <th style="padding:8px 12px;font-weight:600;text-align:right;">Logins</th>
+        <th style="padding:8px 12px;font-weight:600;text-align:right;">Distinct users</th>
+      </tr>
+    </thead>
+    <tbody>
+      $rowsHtml
+      $totalRow
+    </tbody>
+  </table>
+
+  <p style="margin:8px 0 0;font-size:11px;color:#888;">
+    Distinct users are counted once across the whole report, so the total is not the sum of the column.
+  </p>
+
+  $topHtml
+
+  <p style="margin:22px 0 4px;font-size:13px;color:#333;">
+    Full detail is in the attached workbook ($sheetNote).
+  </p>
+
+  <p style="margin:18px 0 0;padding-top:10px;border-top:1px solid #e4e8ee;font-size:11px;color:#999;">
+    Source: Loki at $LokiUrl &nbsp;&middot;&nbsp; match <code>|= "User Login"</code><br/>
+    Generated $genStamp &nbsp;&middot;&nbsp; automated, do not reply
+  </p>
+
+</div></body></html>
 "@
 
 $msg = New-Object System.Net.Mail.MailMessage

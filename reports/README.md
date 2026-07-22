@@ -112,6 +112,24 @@ The window always ends at the first of the *next* month, so a mid-month run
 reports the month so far rather than failing. Useful for a spot check, but a run
 before month-end is by definition a partial figure.
 
+## Multiple environments
+
+`ENVS` takes a comma-separated list and produces **one** email covering all of
+them:
+
+```
+ENVS = DEV1,QA7,UAT1
+```
+
+The email leads with a table of logins and distinct users per environment and
+centre, plus the busiest users across the whole report. Every environment also
+appears in all four workbook sheets.
+
+**Distinct users are counted with a set, not summed.** Someone who logs into both
+DEV1 and QA7 counts once in the total, so the TOTAL row is normally *lower* than
+the sum of the column above it. The email says so, since it otherwise looks like
+an arithmetic error.
+
 ## Usernames and timestamps
 
 With `INCLUDE_USER_DETAIL` on (the default) the workbook gains two sheets:
