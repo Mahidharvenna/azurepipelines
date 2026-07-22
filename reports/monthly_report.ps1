@@ -528,7 +528,7 @@ $dailyRows = New-Object System.Collections.ArrayList
 [void]$dailyRows.Add(@(''))
 $hdr = @('Date')
 foreach ($cb in $combos) {
-    $hdr += $(if ($Products.Count -eq 1) { $cb[0] } else { "$($cb[0])/$($cb[1].ToUpper())" })
+    $hdr += $(if ($Products.Count -eq 1) { [string]$cb[0] } else { "$([string]$cb[0])/$(([string]$cb[1]).ToUpper())" })
 }
 [void]$dailyRows.Add($hdr)
 $dailyHeaderIndex = $dailyRows.Count - 1
