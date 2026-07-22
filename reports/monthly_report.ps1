@@ -50,7 +50,10 @@ $SmtpPass = Get-EnvOr 'SMTP_PASS'
 
 $FromAddr = Get-EnvOr 'FROM_ADDR'
 $ToAddrs  = Split-List (Get-EnvOr 'TO_ADDRS')
-$Envs     = Split-List (Get-EnvOr 'ENVS' 'DEV1')
+# ENVS: a comma-separated list, or the literal ALL to discover every environment
+# that has logs in the reporting window (see Resolve-Environments below).
+$Envs        = Split-List (Get-EnvOr 'ENVS' 'DEV1')
+$EnvsExclude = @(Split-List (Get-EnvOr 'ENVS_EXCLUDE') | ForEach-Object { $_.ToUpper() })
 $Products = @(Split-List (Get-EnvOr 'PRODUCTS' 'pc') | ForEach-Object { $_.ToLower() })
 $OutDir   = Get-EnvOr 'OUTPUT_DIR' '.'
 
@@ -270,6 +273,49 @@ function Get-DailyCounts {
     return $daily
 }
 
+# ---------------------------------------------------------------------------
+# ENVIRONMENT DISCOVERY
+# ---------------------------------------------------------------------------
+function Get-DiscoveredEnvs {
+    $uri  = "$LokiUrl/loki/api/v1/label/env/values"
+    $job  = $ProductMeta[$Products[0]].job
+    $body = @{
+        start = (Get-UnixNanos $start).ToString()
+        end   = (Get-UnixNanos $end).ToString()
+        # Scoping by selector needs Loki 2.8+. Older versions ignore it and
+        # return every env label in the store, which is why empty ones are
+        # dropped after querying rather than trusted from this call.
+        query = ('{{project="{0}", job="{1}"}}' -f $LokiProject, $job)
+    }
+    try {
+        $resp = Invoke-RestMethod -Uri $uri -Method Get -Body $body -TimeoutSec 60
+    } catch {
+        throw "Could not discover environments from Loki ($uri): $_`nSet ENVS to an explicit list instead of ALL."
+    }
+    return @($resp.data)
+}
+
+function Sort-EnvNatural { param([string[]]$Names)
+    # Plain alphabetical puts QA10 before QA2; sort on the letter prefix, then
+    # the numeric suffix.
+    return @($Names | Sort-Object `
+        @{ Expression = { ($_ -replace '\d', '') } }, `
+        @{ Expression = { $d = ($_ -replace '\D', ''); if ($d) { [int]$d } else { 0 } } })
+}
+
+$discovered = $false
+if ($Envs.Count -eq 1 -and $Envs[0].ToUpper() -eq 'ALL') {
+    $discovered = $true
+    $found = Get-DiscoveredEnvs
+    if ($found.Count -eq 0) {
+        throw "ENVS=ALL found no 'env' label values in Loki for the reporting window. Check LOKI_PROJECT and the job label."
+    }
+    $Envs = Sort-EnvNatural (@($found) | Where-Object { $EnvsExclude -notcontains $_.ToUpper() })
+    Write-Host "Discovered envs  : $($found.Count) found, $($Envs.Count) after exclusions"
+    Write-Host "                   $($Envs -join ', ')"
+    Write-Host ""
+}
+
 $data = @{}
 foreach ($e in $Envs) {
     foreach ($p in $Products) {
@@ -288,6 +334,27 @@ foreach ($e in $Envs) {
     }
 }
 Write-Host ""
+
+if ($discovered) {
+    # Discovery returns every env with any log line; many will have no logins for
+    # the centres being reported. Listing them explicitly keeps their zero rows,
+    # since an explicit request for an env makes a zero meaningful.
+    $keep = @()
+    foreach ($e in $Envs) {
+        $sum = 0
+        foreach ($p in $Products) { $sum += $data["$e|$p"].total }
+        if ($sum -gt 0) { $keep += $e }
+    }
+    $dropped = $Envs.Count - $keep.Count
+    if ($dropped -gt 0) {
+        Write-Host "Omitted $dropped discovered env(s) with no logins in this period."
+    }
+    if ($keep.Count -eq 0) {
+        throw "None of the $($Envs.Count) discovered environments had any logins in this period."
+    }
+    $Envs = $keep
+    Write-Host ""
+}
 
 # ---------------------------------------------------------------------------
 # XLSX WRITER -- OOXML by hand, so no module or Excel install is required

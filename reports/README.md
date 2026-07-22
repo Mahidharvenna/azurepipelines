@@ -121,6 +121,30 @@ them:
 ENVS = DEV1,QA7,UAT1
 ```
 
+### `ENVS = ALL`
+
+Set it to the literal `ALL` and the run discovers every environment that has logs
+in the period, from Loki's label-values API, sorted naturally (`QA2` before
+`QA10`, not after):
+
+```
+Discovered envs  : 14 found, 12 after exclusions
+                   DEV1, DEV2, DEV5, QA1, QA2, QA7, QA8, QA12, UAT, UAT1, UAT2, UAT3
+```
+
+Two things to know:
+
+- **`ALL` means all, including production.** Use `ENVS_EXCLUDE=PROD1,PROD2` to
+  drop the ones you do not want.
+- **Environments with no logins are omitted** when discovering, since a
+  discovered-but-idle environment is noise. The run says how many were dropped.
+  When you list environments *explicitly*, zero rows are kept — asking for an
+  environment makes a zero meaningful.
+
+`ALL` also means the report picks up a new environment on its own, which is
+either convenient or surprising depending on your view. An explicit list is more
+predictable; `ALL` is less maintenance.
+
 The email leads with a table of logins and distinct users per environment and
 centre, plus the busiest users across the whole report. Every environment also
 appears in all four workbook sheets.
