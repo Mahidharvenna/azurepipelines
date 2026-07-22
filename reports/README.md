@@ -48,6 +48,7 @@ Pipelines → Library → **+ Variable group** → name it **`gw-reports-secrets
 | `TO_ADDRS` | `you@example.com,team@example.com` (comma-sep) | no |
 | `ENVS` | `DEV1,QA1,UAT1,PROD1` (match your Loki `env` label casing) | no |
 | `PRODUCTS` | `pc` (or `pc,bc,cc,cm`) | no |
+| `LOKI_MAX_QUERY_DAYS` | *(optional, default `7`)* — see below | no |
 
 Toggle **Allow access to all pipelines** (or grant to this pipeline only).
 
@@ -105,6 +106,31 @@ so a run on 31 July reports July.
 The window always ends at the first of the *next* month, so a mid-month run
 reports the month so far rather than failing. Useful for a spot check, but a run
 before month-end is by definition a partial figure.
+
+## Loki query length limit
+
+Loki caps how long a single `query_range` may span (`max_query_length`, commonly
+30 or 31 days). A calendar month can exceed it:
+
+```
+the query time range exceeds the limit (query length: 744h0m0s, limit: 30d1h)
+```
+
+The script therefore fetches the month in chunks of `LOKI_MAX_QUERY_DAYS` days
+(default **7**) and stitches the daily figures together. Results are keyed by
+date, so overlapping chunk boundaries cannot double count. Lower the value if
+your Loki is stricter; raising it gains nothing.
+
+### Day alignment
+
+Loki returns a sample at each step whose value covers the **preceding** range —
+the sample stamped `02 Jul 00:00` with `[1d]` counts **01 Jul**. The script
+queries from `start + 1d` and labels each sample `timestamp - 1d`. Without that,
+every figure would sit a day early and the day before the reporting period would
+be pulled in.
+
+Worth knowing if you ever reconcile against Grafana: the dashboard uses
+`$__auto` and Grafana handles this alignment for you.
 
 ## Notes / gotchas
 

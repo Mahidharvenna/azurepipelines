@@ -35,6 +35,11 @@ function Split-List { param([string]$Value)
 
 $LokiUrl     = (Get-EnvOr 'LOKI_URL' 'https://your-loki-host.example.com:3100').TrimEnd('/')
 $LokiProject = Get-EnvOr 'LOKI_PROJECT' 'myproject'
+# Loki caps how long a single query_range may span (max_query_length, often
+# 30d or 31d). A calendar month can exceed it, so the window is fetched in
+# chunks of this many days and stitched back together. Lower it if your Loki
+# is stricter; there is no benefit to raising it.
+$ChunkDays   = [int](Get-EnvOr 'LOKI_MAX_QUERY_DAYS' '7')
 $VerifyTls   = Get-EnvBool 'LOKI_VERIFY_TLS' $true
 
 $SmtpHost = Get-EnvOr 'SMTP_HOST'
@@ -128,25 +133,51 @@ function Get-DailyCounts {
     $meta  = $ProductMeta[$Product]
     $query = $QueryTemplate -f $LokiProject, $meta.job, $EnvLabel, $meta.frag
     $uri   = "$LokiUrl/loki/api/v1/query_range"
-    $body  = @{
-        query = $query
-        start = (Get-UnixNanos $start).ToString()
-        end   = (Get-UnixNanos $end).ToString()
-        step  = '1d'
-    }
-    try {
-        $resp = Invoke-RestMethod -Uri $uri -Method Get -Body $body -TimeoutSec 120
-    } catch {
-        throw "Loki query failed for $EnvLabel/$Product : $_`nQuery: $query"
-    }
-    $result = $resp.data.result
-    $daily  = @{}
-    if ($result -and $result.Count -gt 0) {
-        foreach ($pair in $result[0].values) {
-            $day = [DateTimeOffset]::FromUnixTimeSeconds([long][double]$pair[0]).UtcDateTime.Date
-            $daily[$day] = [int][double]$pair[1]
+    $daily = @{}
+
+    # Loki returns a sample at each step whose value is count_over_time over the
+    # PRECEDING range -- the sample stamped 02 Jul 00:00 with [1d] covers 01 Jul.
+    # So query from start+1d and label each sample with (timestamp - 1d); using
+    # the raw timestamp would shift every figure a day earlier and pull in the
+    # day before the reporting period.
+    $queryStart = $start.AddDays(1)
+    $chunkFrom  = $queryStart
+    $chunks     = 0
+
+    while ($chunkFrom -lt $end) {
+        $chunkTo = $chunkFrom.AddDays($ChunkDays)
+        if ($chunkTo -gt $end) { $chunkTo = $end }
+        $chunks++
+
+        $body = @{
+            query = $query
+            start = (Get-UnixNanos $chunkFrom).ToString()
+            end   = (Get-UnixNanos $chunkTo).ToString()
+            step  = '1d'
         }
+        try {
+            $resp = Invoke-RestMethod -Uri $uri -Method Get -Body $body -TimeoutSec 120
+        } catch {
+            $detail = $_.ToString()
+            if ($detail -match 'exceeds the limit') {
+                throw "Loki rejected the query window for $EnvLabel/$Product. Lower LOKI_MAX_QUERY_DAYS (currently $ChunkDays).`nLoki said: $detail"
+            }
+            throw "Loki query failed for $EnvLabel/$Product ($($chunkFrom.ToString('yyyy-MM-dd')) to $($chunkTo.ToString('yyyy-MM-dd'))): $detail`nQuery: $query"
+        }
+
+        $result = $resp.data.result
+        if ($result -and $result.Count -gt 0) {
+            foreach ($pair in $result[0].values) {
+                $sampleAt = [DateTimeOffset]::FromUnixTimeSeconds([long][double]$pair[0]).UtcDateTime
+                $day      = $sampleAt.AddDays(-1).Date          # the day the sample covers
+                if ($day -ge $start.Date -and $day -lt $end.Date) {
+                    $daily[$day] = [int][double]$pair[1]        # assign, so chunk overlaps cannot double count
+                }
+            }
+        }
+        $chunkFrom = $chunkTo
     }
+    Write-Verbose "  ($chunks chunk(s) of up to $ChunkDays days)"
     return $daily
 }
 
