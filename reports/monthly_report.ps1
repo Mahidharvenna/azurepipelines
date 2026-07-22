@@ -54,6 +54,23 @@ $Envs     = Split-List (Get-EnvOr 'ENVS' 'DEV1')
 $Products = @(Split-List (Get-EnvOr 'PRODUCTS' 'pc') | ForEach-Object { $_.ToLower() })
 $OutDir   = Get-EnvOr 'OUTPUT_DIR' '.'
 
+# Per-user detail. The username has to be pulled out of the log line, and that
+# format is site-specific -- set LOGIN_USER_REGEX with a named group 'user'.
+# The default covers "User Login: jdoe" / "User Login jdoe" / "User Login=jdoe".
+# The run prints sample lines, so the first report shows you what to match.
+$IncludeUsers  = Get-EnvBool 'INCLUDE_USER_DETAIL' $true
+$UserRegex     = Get-EnvOr 'LOGIN_USER_REGEX' '(?i)User\s+Login\s*[:=\-]?\s*(?<user>[A-Za-z0-9._\\@-]+)'
+$LogLimit      = [int](Get-EnvOr 'LOKI_LOG_LIMIT' '5000')   # Loki's per-query entry cap
+$MaxDetailRows = [int](Get-EnvOr 'MAX_DETAIL_ROWS' '50000')
+$ReportTz      = Get-EnvOr 'REPORT_TIMEZONE'                # e.g. 'Eastern Standard Time'; blank = UTC
+
+$tzInfo = $null
+if ($ReportTz) {
+    try   { $tzInfo = [TimeZoneInfo]::FindSystemTimeZoneById($ReportTz) }
+    catch { Write-Host "##vso[task.logissue type=warning]Unknown REPORT_TIMEZONE '$ReportTz' -- timestamps stay in UTC." }
+}
+$tzLabel = if ($tzInfo) { $ReportTz } else { 'UTC' }
+
 foreach ($req in @{ SMTP_HOST = $SmtpHost; FROM_ADDR = $FromAddr }.GetEnumerator()) {
     if ([string]::IsNullOrWhiteSpace($req.Value)) { throw "$($req.Key) is not set. Add it to the variable group." }
 }
@@ -128,6 +145,78 @@ function Get-UnixNanos { param([datetime]$T)
     return [long]([DateTimeOffset]::new($T).ToUnixTimeSeconds()) * 1000000000L
 }
 
+# Same selector as the metric query, but without the aggregation -- this returns
+# the actual log lines so usernames and timestamps can be read off them.
+$LogSelectorTemplate = '{{project="{0}", job="{1}", env="{2}", filename=~".*{3}.log"}} |= `User Login`'
+
+function ConvertFrom-UnixNanos { param([long]$Nanos)
+    $utc = [DateTimeOffset]::FromUnixTimeMilliseconds([long]($Nanos / 1000000)).UtcDateTime
+    if ($tzInfo) { return [TimeZoneInfo]::ConvertTimeFromUtc($utc, $tzInfo) }
+    return $utc
+}
+
+function Get-LoginEvents {
+    param([string]$EnvLabel, [string]$Product)
+    $meta   = $ProductMeta[$Product]
+    $sel    = $LogSelectorTemplate -f $LokiProject, $meta.job, $EnvLabel, $meta.frag
+    $uri    = "$LokiUrl/loki/api/v1/query_range"
+    $events = New-Object System.Collections.ArrayList
+    $samples = New-Object System.Collections.ArrayList
+    $unparsed = 0
+    $hitLimit = $false
+
+    $chunkFrom = $start
+    while ($chunkFrom -lt $end) {
+        $chunkTo = $chunkFrom.AddDays($ChunkDays)
+        if ($chunkTo -gt $end) { $chunkTo = $end }
+
+        $body = @{
+            query     = $sel
+            start     = (Get-UnixNanos $chunkFrom).ToString()
+            end       = (Get-UnixNanos $chunkTo).ToString()
+            limit     = $LogLimit
+            direction = 'forward'
+        }
+        try {
+            $resp = Invoke-RestMethod -Uri $uri -Method Get -Body $body -TimeoutSec 180
+        } catch {
+            throw "Loki log query failed for $EnvLabel/$Product ($($chunkFrom.ToString('yyyy-MM-dd')) to $($chunkTo.ToString('yyyy-MM-dd'))): $_`nSelector: $sel"
+        }
+
+        $inChunk = 0
+        foreach ($stream in $resp.data.result) {
+            foreach ($entry in $stream.values) {
+                $inChunk++
+                $line = [string]$entry[1]
+                $when = ConvertFrom-UnixNanos ([long]$entry[0])
+
+                $user = ''
+                $m = [regex]::Match($line, $UserRegex)
+                if ($m.Success -and $m.Groups['user'].Success) {
+                    $user = $m.Groups['user'].Value
+                } else {
+                    $unparsed++
+                    if ($samples.Count -lt 3) { [void]$samples.Add($line) }
+                }
+                [void]$events.Add([pscustomobject]@{ When = $when; User = $user; Line = $line })
+            }
+        }
+        # Loki caps entries per query; hitting it means this chunk was truncated.
+        if ($inChunk -ge $LogLimit) { $hitLimit = $true }
+        $chunkFrom = $chunkTo
+    }
+
+    if ($hitLimit) {
+        Write-Host "##vso[task.logissue type=warning]$EnvLabel/$Product hit Loki's $LogLimit-entry cap in at least one chunk -- the user detail is incomplete. Lower LOKI_MAX_QUERY_DAYS to fetch smaller windows."
+    }
+    if ($unparsed -gt 0) {
+        Write-Host "##vso[task.logissue type=warning]$EnvLabel/$Product : $unparsed line(s) did not match LOGIN_USER_REGEX -- those users are blank."
+        Write-Host "  Sample lines that did not match (use these to set LOGIN_USER_REGEX):"
+        foreach ($smp in $samples) { Write-Host "    $smp" }
+    }
+    return $events
+}
+
 function Get-DailyCounts {
     param([string]$EnvLabel, [string]$Product)
     $meta  = $ProductMeta[$Product]
@@ -187,8 +276,15 @@ foreach ($e in $Envs) {
         $daily = Get-DailyCounts -EnvLabel $e -Product $p
         $total = ($daily.Values | Measure-Object -Sum).Sum
         if ($null -eq $total) { $total = 0 }
-        $data["$e|$p"] = @{ daily = $daily; total = [int]$total }
-        Write-Host ("  {0,-8} {1,-4} {2,8:N0} logins" -f $e, $p.ToUpper(), $total)
+        $events = @()
+        if ($IncludeUsers) { $events = @(Get-LoginEvents -EnvLabel $e -Product $p) }
+        $data["$e|$p"] = @{ daily = $daily; total = [int]$total; events = $events }
+        $distinct = @($events | Where-Object { $_.User } | Select-Object -ExpandProperty User -Unique).Count
+        if ($IncludeUsers) {
+            Write-Host ("  {0,-8} {1,-4} {2,8:N0} logins   {3,5:N0} distinct users" -f $e, $p.ToUpper(), $total, $distinct)
+        } else {
+            Write-Host ("  {0,-8} {1,-4} {2,8:N0} logins" -f $e, $p.ToUpper(), $total)
+        }
     }
 }
 Write-Host ""
@@ -214,9 +310,9 @@ function ConvertTo-XmlText { param([string]$Text)
 }
 
 # Style ids defined in styles.xml below: 0 normal, 1 bold, 2 number (#,##0),
-# 3 bold on a fill (header), 4 date.
+# 3 bold on a fill (header), 4 date, 5 date+time.
 function New-SheetXml {
-    param([object[]]$Rows, [int]$HeaderRow = -1)
+    param([object[]]$Rows, [int]$HeaderRow = -1, [string]$DateStyle = '4')
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>')
     [void]$sb.Append('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>')
@@ -230,8 +326,9 @@ function New-SheetXml {
             if ($v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal]) {
                 [void]$sb.Append("<c r=`"$ref`" s=`"2`"><v>$v</v></c>")
             } elseif ($v -is [datetime]) {
-                $serial = ($v - [datetime]'1899-12-30').Days
-                [void]$sb.Append("<c r=`"$ref`" s=`"4`"><v>$serial</v></c>")
+                # TotalDays, not Days -- the fraction carries the time of day.
+                $serial = ($v - [datetime]'1899-12-30').TotalDays
+                [void]$sb.Append("<c r=`"$ref`" s=`"$DateStyle`"><v>$serial</v></c>")
             } else {
                 $style = if ($r -eq $HeaderRow) { '3' } else { '0' }
                 $text  = ConvertTo-XmlText ([string]$v)
@@ -306,19 +403,21 @@ function New-XlsxFile {
             '<fill><patternFill patternType="solid"><fgColor rgb="FF305496"/><bgColor indexed="64"/></patternFill></fill></fills>' +
             '<borders count="1"><border/></borders>' +
             '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
-            '<cellXfs count="5">' +
+            '<cellXfs count="6">' +
             '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
             '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>' +
             '<xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' +
             '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>' +
             '<xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' +
+            '<xf numFmtId="22" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>' +
             '</cellXfs>' +
             '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
             '</styleSheet>')
 
         for ($i = 0; $i -lt $Sheets.Count; $i++) {
             $hdr = if ($null -ne $Sheets[$i].HeaderRow) { $Sheets[$i].HeaderRow } else { -1 }
-            Add-Part $zip "xl/worksheets/sheet$($i + 1).xml" (New-SheetXml -Rows $Sheets[$i].Rows -HeaderRow $hdr)
+            $ds  = if ($Sheets[$i].DateStyle) { $Sheets[$i].DateStyle } else { '4' }
+            Add-Part $zip "xl/worksheets/sheet$($i + 1).xml" (New-SheetXml -Rows $Sheets[$i].Rows -HeaderRow $hdr -DateStyle $ds)
         }
     } finally {
         $zip.Dispose()
@@ -373,14 +472,76 @@ foreach ($d in $allDates) {
     [void]$dailyRows.Add($row)
 }
 
+# Users sheet: one row per user per env/centre, busiest first.
+$userRows = New-Object System.Collections.ArrayList
+$detailRows = New-Object System.Collections.ArrayList
+$userHeaderIndex = -1
+$detailHeaderIndex = -1
+
+if ($IncludeUsers) {
+    [void]$userRows.Add(@('Logins by User'))
+    [void]$userRows.Add(@("$monthLabel   |   timestamps in $tzLabel"))
+    [void]$userRows.Add(@(''))
+    [void]$userRows.Add(@('User', 'Environment', 'Centre', 'Logins', 'First Login', 'Last Login'))
+    $userHeaderIndex = $userRows.Count - 1
+
+    foreach ($e in $Envs) {
+        foreach ($p in $Products) {
+            $evts = $data["$e|$p"].events
+            $grouped = $evts | Where-Object { $_.User } | Group-Object -Property User |
+                       Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, Name
+            foreach ($g in $grouped) {
+                $times = $g.Group | Select-Object -ExpandProperty When | Sort-Object
+                [void]$userRows.Add(@($g.Name, $e, $ProductMeta[$p].label, [int]$g.Count, $times[0], $times[-1]))
+            }
+            $blank = @($evts | Where-Object { -not $_.User }).Count
+            if ($blank -gt 0) {
+                [void]$userRows.Add(@('(unparsed)', $e, $ProductMeta[$p].label, [int]$blank, $null, $null))
+            }
+        }
+    }
+    if ($userRows.Count -eq ($userHeaderIndex + 1)) { [void]$userRows.Add(@('(no login events found)')) }
+
+    # Detail sheet: every login event.
+    [void]$detailRows.Add(@('Login Detail'))
+    [void]$detailRows.Add(@("$monthLabel   |   timestamps in $tzLabel"))
+    [void]$detailRows.Add(@(''))
+    [void]$detailRows.Add(@('Timestamp', 'Environment', 'Centre', 'User'))
+    $detailHeaderIndex = $detailRows.Count - 1
+
+    $all = @()
+    foreach ($e in $Envs) {
+        foreach ($p in $Products) {
+            foreach ($ev in $data["$e|$p"].events) {
+                $all += [pscustomobject]@{ When = $ev.When; Env = $e; Centre = $ProductMeta[$p].label; User = $ev.User }
+            }
+        }
+    }
+    $all = @($all | Sort-Object When)
+    if ($all.Count -gt $MaxDetailRows) {
+        Write-Host "##vso[task.logissue type=warning]Login detail truncated to $MaxDetailRows of $($all.Count) rows (MAX_DETAIL_ROWS)."
+        $all = $all[0..($MaxDetailRows - 1)]
+    }
+    foreach ($row in $all) {
+        [void]$detailRows.Add(@($row.When, $row.Env, $row.Centre, $(if ($row.User) { $row.User } else { '(unparsed)' })))
+    }
+    if ($all.Count -eq 0) { [void]$detailRows.Add(@('(no login events found)')) }
+    Write-Host "Detail rows      : $($all.Count)"
+}
+
 $fileName = "gw-logins-$($start.ToString('yyyy-MM')).xlsx"
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $xlsxPath = Join-Path $OutDir $fileName
 
-New-XlsxFile -Path $xlsxPath -Sheets @(
+$sheetSpecs = @(
     @{ Name = 'Summary'; Rows = $summaryRows.ToArray(); HeaderRow = $headerRowIndex },
     @{ Name = 'Daily';   Rows = $dailyRows.ToArray();   HeaderRow = $dailyHeaderIndex }
 )
+if ($IncludeUsers) {
+    $sheetSpecs += @{ Name = 'Users';  Rows = $userRows.ToArray();   HeaderRow = $userHeaderIndex;   DateStyle = '5' }
+    $sheetSpecs += @{ Name = 'Detail'; Rows = $detailRows.ToArray(); HeaderRow = $detailHeaderIndex; DateStyle = '5' }
+}
+New-XlsxFile -Path $xlsxPath -Sheets $sheetSpecs
 Write-Host "Wrote $xlsxPath ($([math]::Round((Get-Item $xlsxPath).Length / 1KB, 1)) KB)"
 
 # ---------------------------------------------------------------------------

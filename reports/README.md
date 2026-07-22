@@ -49,6 +49,11 @@ Pipelines → Library → **+ Variable group** → name it **`gw-reports-secrets
 | `ENVS` | `DEV1,QA1,UAT1,PROD1` (match your Loki `env` label casing) | no |
 | `PRODUCTS` | `pc` (or `pc,bc,cc,cm`) | no |
 | `LOKI_MAX_QUERY_DAYS` | *(optional, default `7`)* — see below | no |
+| `INCLUDE_USER_DETAIL` | *(optional, default `true`)* — per-user sheets | no |
+| `LOGIN_USER_REGEX` | *(optional)* — must capture a named group `user`; see below | no |
+| `REPORT_TIMEZONE` | *(optional)* e.g. `Eastern Standard Time`; blank = UTC | no |
+| `LOKI_LOG_LIMIT` | *(optional, default `5000`)* Loki's per-query entry cap | no |
+| `MAX_DETAIL_ROWS` | *(optional, default `50000`)* | no |
 
 Toggle **Allow access to all pipelines** (or grant to this pipeline only).
 
@@ -106,6 +111,55 @@ so a run on 31 July reports July.
 The window always ends at the first of the *next* month, so a mid-month run
 reports the month so far rather than failing. Useful for a spot check, but a run
 before month-end is by definition a partial figure.
+
+## Usernames and timestamps
+
+With `INCLUDE_USER_DETAIL` on (the default) the workbook gains two sheets:
+
+| Sheet | Contents |
+|---|---|
+| **Users** | User, Environment, Centre, Logins, First Login, Last Login — busiest first |
+| **Detail** | One row per login: Timestamp, Environment, Centre, User |
+
+This needs the raw log lines, not just counts, so it runs a second Loki query per
+env/centre alongside the aggregate one. The totals still come from the aggregate
+query, so they stay correct even if the line fetch is capped.
+
+### Setting `LOGIN_USER_REGEX`
+
+The username has to be pulled out of the log line, and that format is
+site-specific. The default handles `User Login: jdoe`, `User Login jdoe` and
+`User Login=jdoe`:
+
+```
+(?i)User\s+Login\s*[:=\-]?\s*(?<user>[A-Za-z0-9._\\@-]+)
+```
+
+It **must** contain a named group `user`. If a line does not match, the run warns
+and prints the first few unmatched lines:
+
+```
+DEV1/pc : 412 line(s) did not match LOGIN_USER_REGEX -- those users are blank.
+  Sample lines that did not match (use these to set LOGIN_USER_REGEX):
+    2026-07-15 09:23:41,123 INFO  Server.Security  jdoe successful User Login from 10.1.2.3
+```
+
+Copy a sample, write a regex that matches it, set `LOGIN_USER_REGEX`, re-run.
+Unmatched events are still counted, under the user `(unparsed)`, so nothing is
+silently dropped.
+
+### Timestamps
+
+UTC by default. Set `REPORT_TIMEZONE` to a Windows time-zone id
+(`Eastern Standard Time`, `GMT Standard Time`, …) to convert; the sheets say
+which zone they are in. An unknown id warns and falls back to UTC.
+
+### Entry cap
+
+Loki limits entries per query (`LOKI_LOG_LIMIT`, default 5000). Chunking usually
+keeps each window under it, but a busy environment can still hit it — the run
+warns and tells you to lower `LOKI_MAX_QUERY_DAYS`. **Aggregate totals are
+unaffected**; only the per-user detail would be short.
 
 ## Loki query length limit
 
