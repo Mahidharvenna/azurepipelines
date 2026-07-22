@@ -280,22 +280,41 @@ function Get-DailyCounts {
 # ENVIRONMENT DISCOVERY
 # ---------------------------------------------------------------------------
 function Get-DiscoveredEnvs {
-    $uri  = "$LokiUrl/loki/api/v1/label/env/values"
-    $job  = $ProductMeta[$Products[0]].job
-    $body = @{
-        start = (Get-UnixNanos $start).ToString()
-        end   = (Get-UnixNanos $end).ToString()
-        # Scoping by selector needs Loki 2.8+. Older versions ignore it and
-        # return every env label in the store, which is why empty ones are
-        # dropped after querying rather than trusted from this call.
-        query = ('{{project="{0}", job="{1}"}}' -f $LokiProject, $job)
+    # Chunked for the same reason the data queries are: the label-values endpoint
+    # is subject to max_query_length too, so asking for a whole month at once is
+    # rejected. Each window is unioned, so an environment active for only part of
+    # the month is still found.
+    $uri   = "$LokiUrl/loki/api/v1/label/env/values"
+    $job   = $ProductMeta[$Products[0]].job
+    $found = New-Object 'System.Collections.Generic.HashSet[string]'
+
+    $chunkFrom = $start
+    while ($chunkFrom -lt $end) {
+        $chunkTo = $chunkFrom.AddDays($ChunkDays)
+        if ($chunkTo -gt $end) { $chunkTo = $end }
+
+        $body = @{
+            start = (Get-UnixNanos $chunkFrom).ToString()
+            end   = (Get-UnixNanos $chunkTo).ToString()
+            # Scoping by selector needs Loki 2.8+. Older versions ignore it and
+            # return every env label, which the empty-environment drop cleans up.
+            query = ('{{project="{0}", job="{1}"}}' -f $LokiProject, $job)
+        }
+        try {
+            $resp = Invoke-RestMethod -Uri $uri -Method Get -Body $body -TimeoutSec 60
+        } catch {
+            $detail = $_.ToString()
+            if ($detail -match 'exceeds the limit') {
+                throw "Loki rejected the discovery window. Lower LOKI_MAX_QUERY_DAYS (currently $ChunkDays).`nLoki said: $detail"
+            }
+            throw "Could not discover environments from Loki ($uri): $detail`nSet ENVS to an explicit list instead of ALL."
+        }
+        foreach ($v in @($resp.data)) {
+            if ($v) { [void]$found.Add([string]$v) }
+        }
+        $chunkFrom = $chunkTo
     }
-    try {
-        $resp = Invoke-RestMethod -Uri $uri -Method Get -Body $body -TimeoutSec 60
-    } catch {
-        throw "Could not discover environments from Loki ($uri): $_`nSet ENVS to an explicit list instead of ALL."
-    }
-    return @($resp.data)
+    return @($found)
 }
 
 function Sort-EnvNatural { param([string[]]$Names)
