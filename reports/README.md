@@ -57,6 +57,7 @@ Pipelines → Library → **+ Variable group** → name it **`gw-reports-secrets
 | `REPORT_TIMEZONE` | *(optional)* e.g. `Eastern Standard Time`; blank = UTC | no |
 | `LOKI_LOG_LIMIT` | *(optional, default `5000`)* Loki's per-query entry cap | no |
 | `MAX_DETAIL_ROWS` | *(optional, default `50000`)* | no |
+| `LEAST_USED_COUNT` | *(optional, default `5`)* how many quiet envs to list; `0` hides it | no |
 
 Toggle **Allow access to all pipelines** (or grant to this pipeline only).
 
@@ -163,8 +164,11 @@ either convenient or surprising depending on your view. An explicit list is more
 predictable; `ALL` is less maintenance.
 
 The email leads with a table of logins and distinct users per environment and
-centre, plus the busiest users across the whole report. Every environment also
-appears in all four workbook sheets.
+centre, followed by the **least used environments** — quietest first, across all
+centres reported. Those are the actionable end of an audit: candidates for
+reclaiming or decommissioning. Set `LEAST_USED_COUNT=0` to hide the section.
+
+Every environment also appears in all four workbook sheets.
 
 **Distinct users are counted with a set, not summed.** Someone who logs into both
 DEV1 and QA7 counts once in the total, so the TOTAL row is normally *lower* than

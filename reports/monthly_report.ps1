@@ -64,6 +64,7 @@ $IncludeUsers  = Get-EnvBool 'INCLUDE_USER_DETAIL' $true
 $UserRegex     = Get-EnvOr 'LOGIN_USER_REGEX' '(?i)User\s+Login\s*[:=\-]?\s*(?<user>[A-Za-z0-9._\\@-]+)'
 $LogLimit      = [int](Get-EnvOr 'LOKI_LOG_LIMIT' '5000')   # Loki's per-query entry cap
 $MaxDetailRows = [int](Get-EnvOr 'MAX_DETAIL_ROWS' '50000')
+$LeastUsedCount = [int](Get-EnvOr 'LEAST_USED_COUNT' '5')   # 0 hides the section
 $ReportTz      = Get-EnvOr 'REPORT_TIMEZONE'                # e.g. 'Eastern Standard Time'; blank = UTC
 
 $tzInfo = $null
@@ -645,15 +646,19 @@ $allUsers    = New-Object 'System.Collections.Generic.HashSet[string]'
 $grandLogins = 0
 $rowsHtml    = ''
 $rowIndex    = 0
+$envTotals   = @()
 
 foreach ($e in $Envs) {
+    $envLogins = 0
+    $envUsers  = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($p in $Products) {
         $d = $data["$e|$p"]
         $grandLogins += $d.total
+        $envLogins   += $d.total
 
         if ($IncludeUsers) {
             $users = @($d.events | Where-Object { $_.User } | Select-Object -ExpandProperty User -Unique)
-            foreach ($u in $users) { [void]$allUsers.Add($u) }
+            foreach ($u in $users) { [void]$allUsers.Add($u); [void]$envUsers.Add($u) }
             $userCell = '{0:N0}' -f $users.Count
         } else {
             $userCell = '&mdash;'
@@ -669,6 +674,7 @@ foreach ($e in $Envs) {
             "</tr>")
         $rowIndex++
     }
+    $envTotals += [pscustomobject]@{ Env = $e; Logins = $envLogins; Users = $envUsers.Count }
 }
 
 $grandUserCell = if ($IncludeUsers) { '{0:N0}' -f $allUsers.Count } else { '&mdash;' }
@@ -680,21 +686,22 @@ $totalRow =
     "</tr>"
 
 
-$topHtml = ''
-if ($IncludeUsers) {
-    $everyEvent = @()
-    foreach ($e in $Envs) { foreach ($p in $Products) { $everyEvent += $data["$e|$p"].events } }
-    $top = @($everyEvent | Where-Object { $_.User } | Group-Object -Property User |
-             Sort-Object -Property @{ Expression = { $_.Count }; Descending = $true }, Name |
-             Select-Object -First 5)
-    if ($top.Count -gt 0) {
-        $lis = ($top | ForEach-Object {
-            "<li style=`"margin:2px 0;`"><b>$($_.Name)</b> &mdash; $('{0:N0}' -f $_.Count) logins</li>"
-        }) -join ''
-        $topHtml =
-            "<p style=`"margin:22px 0 6px;font-size:13px;color:#333;`"><b>Busiest users</b></p>" +
-            "<ol style=`"margin:0;padding-left:22px;font-size:13px;color:#333;`">$lis</ol>"
-    }
+# Quiet environments are the actionable end of an audit report -- they are the
+# candidates for reclaiming or decommissioning.
+$leastHtml = ''
+if ($LeastUsedCount -gt 0 -and $envTotals.Count -gt 1) {
+    $take  = [Math]::Min($LeastUsedCount, $envTotals.Count)
+    $least = @($envTotals | Sort-Object Logins, Env | Select-Object -First $take)
+    $lis = ($least | ForEach-Object {
+        $l = '{0:N0}' -f $_.Logins
+        $noun = if ($_.Logins -eq 1) { 'login' } else { 'logins' }
+        $who  = if ($IncludeUsers) { ", $('{0:N0}' -f $_.Users) user$(if ($_.Users -ne 1) { 's' })" } else { '' }
+        "<li style=`"margin:2px 0;`"><b>$($_.Env)</b> &mdash; $l $noun$who</li>"
+    }) -join ''
+    $leastHtml =
+        "<p style=`"margin:22px 0 6px;font-size:13px;color:#333;`"><b>Least used environments</b></p>" +
+        "<ol style=`"margin:0;padding-left:22px;font-size:13px;color:#333;`">$lis</ol>" +
+        "<p style=`"margin:6px 0 0;font-size:11px;color:#888;`">Quietest first, across all centres reported.</p>"
 }
 
 $periodText = "$($start.ToString('d MMM yyyy')) &ndash; $($end.AddDays(-1).ToString('d MMM yyyy'))"
@@ -728,7 +735,7 @@ $html = @"
     Distinct users are counted once across the whole report, so the total is not the sum of the column.
   </p>
 
-  $topHtml
+  $leastHtml
 
   <p style="margin:22px 0 4px;font-size:13px;color:#333;">
     Full detail is in the attached workbook ($sheetNote).
