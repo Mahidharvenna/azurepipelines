@@ -217,8 +217,17 @@ function Get-LoginEvents {
     }
     if ($unparsed -gt 0) {
         Write-Host "##vso[task.logissue type=warning]$EnvLabel/$Product : $unparsed line(s) did not match LOGIN_USER_REGEX -- those users are blank."
-        Write-Host "  Sample lines that did not match (use these to set LOGIN_USER_REGEX):"
-        foreach ($smp in $samples) { Write-Host "    $smp" }
+        Write-Host "  Sample lines that did not match, with their whitespace-delimited fields:"
+        foreach ($smp in $samples) {
+            Write-Host "    $smp"
+            $fields = @($smp -split '\s+' | Where-Object { $_ })
+            $show   = [Math]::Min(5, $fields.Count)
+            $hint   = @()
+            for ($i = 0; $i -lt $show; $i++) { $hint += "[$($i + 1)] $($fields[$i])" }
+            Write-Host "      fields: $($hint -join '   ')"
+        }
+        Write-Host "  If the username is field N, set:  LOGIN_USER_REGEX = ^(\S+\s+){N-1}(?<user>\S+)"
+        Write-Host "  e.g. field 2 -> ^\S+\s+(?<user>\S+)   |   field 3 -> ^(\S+\s+){2}(?<user>\S+)" 
     }
     return $events
 }

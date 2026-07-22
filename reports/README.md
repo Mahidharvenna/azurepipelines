@@ -186,9 +186,25 @@ DEV1/pc : 412 line(s) did not match LOGIN_USER_REGEX -- those users are blank.
     2026-07-15 09:23:41,123 INFO  Server.Security  jdoe successful User Login from 10.1.2.3
 ```
 
-Copy a sample, write a regex that matches it, set `LOGIN_USER_REGEX`, re-run.
+The run also breaks each sample into numbered fields, because many Guidewire
+logs are columnar and the username is simply the *n*th column rather than
+something that follows a keyword:
+
+```
+    node1  jbankay  3de-f511  2026-07-01 00:14:00,552  https-jsse-...  INFO  ...
+      fields: [1] node1   [2] jbankay   [3] 3de-f511   [4] 2026-07-01   [5] 00:14:00,552
+    If the username is field N, set:  LOGIN_USER_REGEX = ^(\S+\s+){N-1}(?<user>\S+)
+```
+
+For a username in the second column that is:
+
+```
+LOGIN_USER_REGEX = ^\S+\s+(?<user>\S+)
+```
+
 Unmatched events are still counted, under the user `(unparsed)`, so nothing is
-silently dropped.
+silently dropped — a large `(unparsed)` figure means the regex is wrong, not
+that the data is missing.
 
 ### Timestamps
 
