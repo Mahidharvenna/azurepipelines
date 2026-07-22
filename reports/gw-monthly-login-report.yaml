@@ -10,9 +10,16 @@
 # Register as its own pipeline (Pipelines -> New -> Existing YAML file).
 # =============================================================================
 
+# Cron cannot express "last day of the month" -- there is no L in standard cron
+# and ADO does not support it. So this fires on days 28-31 and the run itself
+# stands down unless today is genuinely the last day. Expect up to 3 short no-op
+# runs a month; they finish in seconds and are marked skipped.
+#
+# 23:55 UTC is deliberately late: the reporting window is UTC calendar months,
+# so running earlier would cut the final hours out of the month's totals.
 schedules:
-- cron: '0 6 1 * *'                 # 06:00 UTC, day 1 of every month
-  displayName: 'GW monthly login report'
+- cron: '55 23 28-31 * *'           # 23:55 UTC, days 28-31 (guarded to the last one)
+  displayName: 'GW monthly login report (end of month)'
   branches:
     include: [master]
   always: true                      # send regardless of commits since last run
@@ -40,8 +47,31 @@ steps:
   clean: true
   persistCredentials: false
 
+# Stand down on 28/29/30 when they are not the last day of the month.
+# Manual runs always proceed, so a report can be produced on demand.
+- powershell: |
+    $reason  = '$(Build.Reason)'
+    $today   = [datetime]::UtcNow.Date
+    $lastDay = [datetime]::DaysInMonth($today.Year, $today.Month)
+    $isLast  = ($today.Day -eq $lastDay)
+
+    Write-Host "Today (UTC)      : $($today.ToString('yyyy-MM-dd'))"
+    Write-Host "Last day of month: $lastDay"
+    Write-Host "Trigger          : $reason"
+
+    if ($reason -eq 'Schedule' -and -not $isLast) {
+      Write-Host ""
+      Write-Host "Not the last day of the month -- nothing to do."
+      Write-Host "The schedule fires on days 28-31 because cron cannot target the last day directly."
+      Write-Host "##vso[task.setvariable variable=RUN_REPORT]false"
+    } else {
+      Write-Host "##vso[task.setvariable variable=RUN_REPORT]true"
+    }
+  displayName: 'Check this is the last day of the month'
+
 - task: PowerShell@2
   displayName: 'Generate and email login report'
+  condition: and(succeeded(), eq(variables['RUN_REPORT'], 'true'))
   inputs:
     targetType: filePath
     filePath: 'reports/monthly_report.ps1'
@@ -69,7 +99,7 @@ steps:
 # Keep a copy of the spreadsheet attached to the run for re-download/audit.
 - task: PublishBuildArtifacts@1
   displayName: 'Publish xlsx as build artifact'
-  condition: succeededOrFailed()
+  condition: and(succeededOrFailed(), eq(variables['RUN_REPORT'], 'true'))
   inputs:
     PathtoPublish: '$(Build.ArtifactStagingDirectory)'
     ArtifactName: 'monthly-report'

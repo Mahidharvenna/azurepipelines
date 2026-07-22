@@ -82,6 +82,41 @@ sum(count_over_time(
 over the report window, stepped daily. Daily values populate the **Daily** sheet;
 their sum is the **Summary** total.
 
+## Schedule: end of month
+
+The pipeline runs at **23:55 UTC on the last day of each month** and reports that
+month.
+
+Cron cannot target the last day -- there is no `L` in standard cron and ADO does
+not support it -- so the schedule fires on **days 28-31** and each run stands
+down unless today is genuinely the last day:
+
+```
+Today (UTC)      : 2026-07-30
+Last day of month: 31
+Not the last day of the month -- nothing to do.
+```
+
+Expect up to three short no-op runs a month. They finish in seconds and show the
+report step as skipped. Leap years are handled (`DaysInMonth`), so 29 February
+is correctly the last day in a leap year and 28 February otherwise.
+
+**Manual runs always proceed**, whatever the date, so a report can be produced on
+demand.
+
+### The trade-off
+
+The reporting window is UTC calendar months, so a run at 23:55 on the last day
+**cannot include the final ~5 minutes** of that month. If the month must be
+counted to the second, schedule on the 1st instead:
+
+```yaml
+- cron: '0 6 1 * *'      # 06:00 UTC on the 1st
+```
+
+No other change is needed -- the script reports the *last full month* when it is
+not run on a month-end, so both schedules produce the correct period.
+
 ## Notes / gotchas
 
 - **Counts login *events*, not unique users.** A user logging in 5× counts as 5.
