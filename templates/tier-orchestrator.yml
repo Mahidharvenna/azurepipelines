@@ -1,15 +1,6 @@
-# =============================================================================
-# SHARED orchestrator -- the body of every per-tier release pipeline.
-# Called via `extends:` from pipelines/release-*.yaml.
-#
-# Flow:  ReadConfig  -> resolve branch + product set from config/branches.json
-#          -> Build   -> selected products, each from its configured branch
-#          -> Deploy  -> selected products to <TIER><INSTANCE>
-#
-# Neither the release branch nor (on scheduled runs) the product set is entered
-# at queue time -- both come from config/branches.json, keyed by env label.
-# Change here = change everywhere.
-# =============================================================================
+# Shared body of every tier pipeline, extended from pipelines/release-*.yaml.
+# ReadConfig -> Build -> Deploy -> Notify. Branch and product set come from
+# config/branches.json, not from queue parameters.
 
 parameters:
 - name: envTier               # dev, qa, uat -- set by the entry pipeline
@@ -41,9 +32,8 @@ parameters:
 
 resources:
   repositories:
-  # Same-project Azure Repos Git -- no project prefix needed.
-  # ref is intentionally omitted (ADO Server 2022 RTW disallows template
-  # expressions here). The branch is applied at checkout time in gw-build.yml.
+  # ref omitted deliberately: ADO Server 2022 RTW disallows template
+  # expressions here. The branch is applied at checkout in gw-build.yml.
   - repository: pc
     type: git
     name: PC
@@ -59,18 +49,8 @@ resources:
 
 variables:
 - group: 'deployment-secrets'
-# NOTE on envName below: classic releases write the tracking-DB StageName from
-# the built-in $(Release.EnvironmentName) -- i.e. the release STAGE name, which
-# is formatted "<COMP> - <ENV>" (spaces around the hyphen, e.g. "PC - UAT1").
-# YAML has no equivalent variable, so we pass the string explicitly and it MUST
-# match, or the post-deploy lookup misses the existing row, reports
-# "SourceBranch Changed" on every run, and inserts a duplicate key into a table
-# shared by every environment. Confirm your exact format from a release
-# breadcrumb before first use.
-# One CATALINA_BASE per centre -- these are NOT uniform. PC and BC use the
-# default install; CC and CM each live in their own Tomcat. Verify against a
-# classic deploy log before changing: the "Copy Latest war file to Server"
-# step prints the exact target path it copied to.
+# NOT uniform -- CC and CM each have their own Tomcat. Verify against a classic
+# deploy log ("Copy Latest war file to Server" prints the target path).
 - name: catalinaBasePC
   value: '/opt/tomcat/apache-tomcat'
 - name: catalinaBaseBC
@@ -82,11 +62,7 @@ variables:
 
 stages:
 
-# --------------------------------------------------------------------------
-# STAGE 1 : ReadConfig -- resolve branch + product set for this env.
-# Fails fast (with a readable message) if the env has no entry, or if
-# nothing would be deployed.
-# --------------------------------------------------------------------------
+# Fails fast if the env has no config entry or nothing would deploy.
 - template: read-config.yml
   parameters:
     envLabel: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
@@ -98,10 +74,8 @@ stages:
     forceRebuild: ${{ parameters.forceRebuild }}
     poolName: ${{ parameters.poolName }}
 
-# --------------------------------------------------------------------------
-# STAGE 2 : BUILD -- all four jobs are defined; each runs only if ReadConfig
-# said so (run_<comp> = true). Skipped products show as "skipped", not missing.
-# --------------------------------------------------------------------------
+# All four jobs exist; each runs only if ReadConfig set run_<comp>=true, so a
+# skipped centre shows as skipped rather than missing.
 - stage: Build
   displayName: '🔨  Build'
   dependsOn: ReadConfig
@@ -140,10 +114,9 @@ stages:
       runCondition: and(succeeded(), eq(stageDependencies.ReadConfig.Read.outputs['cfg.run_cm'], 'true'))
       genDataDictionaryExpr: $[ stageDependencies.ReadConfig.Read.outputs['cfg.genDataDictionary'] ]
 
-# --------------------------------------------------------------------------
-# STAGE 3 : DEPLOY to <TIER><INSTANCE>
-# depends on ReadConfig (branch + run vars) AND Build (artifacts).
-# --------------------------------------------------------------------------
+# Depends on ReadConfig (branch + run vars) and Build (artifacts).
+# envName MUST match the classic StageName format "<COMP> - <ENV>" (spaces around
+# the hyphen). A mismatch inserts duplicate keys into a shared tracking table.
 - stage: Deploy
   displayName: '🚀  Deploy to ${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'
   dependsOn:
@@ -212,10 +185,7 @@ stages:
       poolName: ${{ parameters.poolName }}
       dbSchema: ${{ parameters.dbSchema }}
 
-# --------------------------------------------------------------------------
-# STAGE 4 : NOTIFY -- posts a summary to Teams.
-# Present but skipped until notifyTeams is true and TEAMS_WEBHOOK is set.
-# --------------------------------------------------------------------------
+# Present but skipped until notifyTeams is true and a webhook is set.
 - template: notify-teams.yml
   parameters:
     envLabel: '${{ upper(parameters.envTier) }}${{ parameters.envInstance }}'

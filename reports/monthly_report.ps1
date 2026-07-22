@@ -1,23 +1,15 @@
 #Requires -Version 5.1
 <#
-    monthly_report.ps1
+    Monthly Guidewire login report: Loki -> Excel -> email.
 
-    Monthly Guidewire login report:  Loki  ->  Excel  ->  email.
-
-    Pure PowerShell. No Python, no pip, no PSGallery module, and no Excel
-    install on the agent -- an .xlsx is just a zip of OOXML parts, which .NET
-    can write directly. That matters on a locked-down build agent where
-    installing a runtime or reaching the PowerShell Gallery may not be an option.
-
-    All configuration comes from environment variables, supplied by the
-    pipeline's variable group. Nothing site-specific is hard-coded.
+    Pure PowerShell -- no Python, no modules, no Excel install. The .xlsx is
+    written directly as OOXML, which matters on a locked-down build agent.
+    All configuration comes from environment variables.
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# ---------------------------------------------------------------------------
-# CONFIG (from environment)
-# ---------------------------------------------------------------------------
+# ---- config ----
 function Get-EnvOr { param([string]$Name, [string]$Default = '')
     $v = [Environment]::GetEnvironmentVariable($Name)
     if ([string]::IsNullOrWhiteSpace($v)) { return $Default }
@@ -35,10 +27,8 @@ function Split-List { param([string]$Value)
 
 $LokiUrl     = (Get-EnvOr 'LOKI_URL' 'https://your-loki-host.example.com:3100').TrimEnd('/')
 $LokiProject = Get-EnvOr 'LOKI_PROJECT' 'myproject'
-# Loki caps how long a single query_range may span (max_query_length, often
-# 30d or 31d). A calendar month can exceed it, so the window is fetched in
-# chunks of this many days and stitched back together. Lower it if your Loki
-# is stricter; there is no benefit to raising it.
+# Loki caps a single query_range span (max_query_length). A month can exceed
+# it, so the window is fetched in chunks and stitched together.
 $ChunkDays   = [int](Get-EnvOr 'LOKI_MAX_QUERY_DAYS' '7')
 $VerifyTls   = Get-EnvBool 'LOKI_VERIFY_TLS' $true
 
@@ -49,30 +39,23 @@ $SmtpUser = Get-EnvOr 'SMTP_USER'
 $SmtpPass = Get-EnvOr 'SMTP_PASS'
 
 $FromAddr = Get-EnvOr 'FROM_ADDR'
-# @() at the CALL SITE is required: a function returning a single-element array
-# has it unwrapped to a scalar by the pipeline, and indexing a scalar string
-# gives a [char] rather than the string. @() forces array semantics either way.
+# @() at the CALL SITE is required: a single-element array gets unwrapped to a
+# scalar on return, and indexing a scalar string yields a [char].
 $ToAddrs  = @(Split-List (Get-EnvOr 'TO_ADDRS'))
-# ENVS: a comma-separated list, or the literal ALL to discover every environment
-# that has logs in the reporting window (see Resolve-Environments below).
+# A comma-separated list, or ALL to discover every env with logs in the window.
 $Envs        = @(Split-List (Get-EnvOr 'ENVS' 'DEV1'))
 $EnvsExclude = @(Split-List (Get-EnvOr 'ENVS_EXCLUDE') | ForEach-Object { $_.ToUpper() })
 $Products = @(Split-List (Get-EnvOr 'PRODUCTS' 'pc') | ForEach-Object { $_.ToLower() })
 $OutDir   = Get-EnvOr 'OUTPUT_DIR' '.'
 
-# Branding. Set REPORT_TITLE to whatever the audience should see -- it heads the
-# email, the subject line and the workbook's Summary sheet.
+# Heads the email, subject line and the workbook's Summary sheet.
 $ReportTitle  = Get-EnvOr 'REPORT_TITLE' 'Guidewire Login Report'
 $FilePrefix   = Get-EnvOr 'REPORT_FILE_PREFIX' 'gw-logins'
 
-# Per-user detail. The username has to be pulled out of the log line, and that
-# format is site-specific -- set LOGIN_USER_REGEX with a named group 'user'.
-# The default covers "User Login: jdoe" / "User Login jdoe" / "User Login=jdoe".
-# Columnar logs -- where the username is simply the nth field rather than text
-# following a keyword -- need a positional pattern instead, e.g.
-#   field 2:  ^\s*\S+\s+(?<user>\S+)
-# The run prints sample lines broken into numbered fields, so the first report
-# tells you which to use.
+# The username must be parsed out of the log line, and that format is
+# site-specific. LOGIN_USER_REGEX needs a named group 'user'. For columnar logs
+# use a positional pattern, e.g. field 2: ^\s*\S+\s+(?<user>\S+)
+# The run prints unmatched samples split into numbered fields to help.
 $IncludeUsers  = Get-EnvBool 'INCLUDE_USER_DETAIL' $true
 $UserRegex     = Get-EnvOr 'LOGIN_USER_REGEX' '(?i)User\s+Login\s*[:=\-]?\s*(?<user>[A-Za-z0-9._\\@-]+)'
 $LogLimit      = [int](Get-EnvOr 'LOKI_LOG_LIMIT' '5000')   # Loki's per-query entry cap
@@ -91,8 +74,7 @@ foreach ($req in @{ SMTP_HOST = $SmtpHost; FROM_ADDR = $FromAddr }.GetEnumerator
 }
 if ($ToAddrs.Count -eq 0) { throw "TO_ADDRS is not set. Add it to the variable group." }
 
-# job label + filename fragment per centre. Confirm these against
-# Grafana -> Explore -> Label browser -> job before enabling BC/CC/CM.
+# Confirm job names in Grafana -> Explore -> Label browser before using BC/CC/CM.
 $ProductMeta = @{
     pc = @{ job = 'pclogs'; frag = 'pc'; label = 'PolicyCenter'   }
     bc = @{ job = 'bclogs'; frag = 'bc'; label = 'BillingCenter'  }
@@ -103,19 +85,10 @@ foreach ($p in $Products) {
     if (-not $ProductMeta.ContainsKey($p)) { throw "Unknown product '$p' in PRODUCTS. Expected any of: pc, bc, cc, cm." }
 }
 
-# ---------------------------------------------------------------------------
-# DATE WINDOW (UTC)
-#
-#   TEST_MONTH=YYYY-MM  -> exactly that month (back-fill / re-issue)
-#   blank               -> the CURRENT month
-#
-# Blank is the normal case, including every scheduled run. Scheduling is managed
-# in the ADO UI, so running on the last day of the month reports that month.
-#
-# Note the window always ends at the first of the NEXT month, so a run partway
-# through reports the month so far rather than failing -- useful for a mid-month
-# spot check, but it does mean a run before month-end is a partial figure.
-# ---------------------------------------------------------------------------
+# ---- date window (UTC) ----
+# TEST_MONTH=YYYY-MM for a specific month, blank for the current one. The window
+# ends at the first of the NEXT month, so a mid-month run reports the month so
+# far rather than failing -- which also means it is a partial figure.
 $testMonth = Get-EnvOr 'TEST_MONTH'
 if ($testMonth) {
     $start = [datetime]::SpecifyKind([datetime]::ParseExact("$testMonth-01", 'yyyy-MM-dd', $null), 'Utc')
@@ -134,9 +107,7 @@ Write-Host "Environments     : $($Envs -join ', ')"
 Write-Host "Centres          : $($Products -join ', ')"
 Write-Host ""
 
-# ---------------------------------------------------------------------------
-# LOKI
-# ---------------------------------------------------------------------------
+# ---- loki ----
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 if (-not $VerifyTls) {
     Write-Host "LOKI_VERIFY_TLS is false -- certificate validation disabled for this run."
@@ -160,8 +131,7 @@ function Get-UnixNanos { param([datetime]$T)
     return [long]([DateTimeOffset]::new($T).ToUnixTimeSeconds()) * 1000000000L
 }
 
-# Same selector as the metric query, but without the aggregation -- this returns
-# the actual log lines so usernames and timestamps can be read off them.
+# Same selector without the aggregation, so the raw lines come back.
 $LogSelectorTemplate = '{{project="{0}", job="{1}", env="{2}", filename=~".*{3}.log"}} |= `User Login`'
 
 function ConvertFrom-UnixNanos { param([long]$Nanos)
@@ -250,11 +220,9 @@ function Get-DailyCounts {
     $uri   = "$LokiUrl/loki/api/v1/query_range"
     $daily = @{}
 
-    # Loki returns a sample at each step whose value is count_over_time over the
-    # PRECEDING range -- the sample stamped 02 Jul 00:00 with [1d] covers 01 Jul.
-    # So query from start+1d and label each sample with (timestamp - 1d); using
-    # the raw timestamp would shift every figure a day earlier and pull in the
-    # day before the reporting period.
+    # Each sample covers the PRECEDING range: the one stamped 02 Jul with [1d]
+    # counts 01 Jul. So query from start+1d and label samples timestamp-1d, or
+    # every figure lands a day early.
     $queryStart = $start.AddDays(1)
     $chunkFrom  = $queryStart
     $chunks     = 0
@@ -296,14 +264,10 @@ function Get-DailyCounts {
     return $daily
 }
 
-# ---------------------------------------------------------------------------
-# ENVIRONMENT DISCOVERY
-# ---------------------------------------------------------------------------
+# ---- environment discovery ----
 function Get-DiscoveredEnvs {
-    # Chunked for the same reason the data queries are: the label-values endpoint
-    # is subject to max_query_length too, so asking for a whole month at once is
-    # rejected. Each window is unioned, so an environment active for only part of
-    # the month is still found.
+    # Chunked like the data queries -- this endpoint has the same length limit.
+    # Windows are unioned, so a briefly-active env is still found.
     $uri   = "$LokiUrl/loki/api/v1/label/env/values"
     $job   = $ProductMeta[$Products[0]].job
     $found = New-Object 'System.Collections.Generic.HashSet[string]'
@@ -378,9 +342,8 @@ foreach ($e in $Envs) {
 Write-Host ""
 
 if ($discovered) {
-    # Discovery returns every env with any log line; many will have no logins for
-    # the centres being reported. Listing them explicitly keeps their zero rows,
-    # since an explicit request for an env makes a zero meaningful.
+    # Discovery returns every env with any log line. Drop the idle ones --
+    # an explicitly listed env keeps its zero row, a discovered one does not.
     $keep = @()
     foreach ($e in $Envs) {
         $sum = 0
@@ -398,9 +361,7 @@ if ($discovered) {
     Write-Host ""
 }
 
-# ---------------------------------------------------------------------------
-# XLSX WRITER -- OOXML by hand, so no module or Excel install is required
-# ---------------------------------------------------------------------------
+# ---- xlsx writer: OOXML by hand, so no module or Excel install is needed ----
 Add-Type -AssemblyName System.IO.Compression | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
 
@@ -418,8 +379,7 @@ function ConvertTo-XmlText { param([string]$Text)
     return ($Text -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;' -replace '"', '&quot;')
 }
 
-# Style ids defined in styles.xml below: 0 normal, 1 bold, 2 number (#,##0),
-# 3 bold on a fill (header), 4 date, 5 date+time.
+# Styles: 0 normal, 1 bold, 2 number, 3 header, 4 date, 5 date+time.
 function New-SheetXml {
     param([object[]]$Rows, [int]$HeaderRow = -1, [string]$DateStyle = '4')
     $sb = New-Object System.Text.StringBuilder
@@ -435,7 +395,7 @@ function New-SheetXml {
             if ($v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal]) {
                 [void]$sb.Append("<c r=`"$ref`" s=`"2`"><v>$v</v></c>")
             } elseif ($v -is [datetime]) {
-                # TotalDays, not Days -- the fraction carries the time of day.
+                # TotalDays: the fraction carries the time of day.
                 $serial = ($v - [datetime]'1899-12-30').TotalDays
                 [void]$sb.Append("<c r=`"$ref`" s=`"$DateStyle`"><v>$serial</v></c>")
             } else {
@@ -451,7 +411,7 @@ function New-SheetXml {
 }
 
 function New-XlsxFile {
-    param([string]$Path, [object[]]$Sheets)   # each: @{ Name; Rows; HeaderRow }
+    param([string]$Path, [object[]]$Sheets)   # @{ Name; Rows; HeaderRow; DateStyle }
 
     if (Test-Path $Path) { Remove-Item $Path -Force }
     $zip = [System.IO.Compression.ZipFile]::Open($Path, 'Create')
@@ -501,7 +461,7 @@ function New-XlsxFile {
             "<Relationship Id=`"rId$styleRelId`" Type=`"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles`" Target=`"styles.xml`"/>" +
             '</Relationships>')
 
-        # numFmtId 3 = #,##0 ; 14 = short date. Both are built in.
+        # numFmtId 3 = #,##0, 14 = date, 22 = date+time (all built in).
         Add-Part $zip 'xl/styles.xml' (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
             '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
@@ -533,9 +493,7 @@ function New-XlsxFile {
     }
 }
 
-# ---------------------------------------------------------------------------
-# BUILD THE WORKBOOK
-# ---------------------------------------------------------------------------
+# ---- workbook ----
 $summaryRows = New-Object System.Collections.ArrayList
 [void]$summaryRows.Add(@($ReportTitle))
 [void]$summaryRows.Add(@("Period: $($start.ToString('yyyy-MM-dd')) to $($end.AddDays(-1).ToString('yyyy-MM-dd'))  ($monthLabel)"))
@@ -581,7 +539,7 @@ foreach ($d in $allDates) {
     [void]$dailyRows.Add($row)
 }
 
-# Users sheet: one row per user per env/centre, busiest first.
+# One row per user per env/centre, busiest first.
 $userRows = New-Object System.Collections.ArrayList
 $detailRows = New-Object System.Collections.ArrayList
 $userHeaderIndex = -1
@@ -653,11 +611,8 @@ if ($IncludeUsers) {
 New-XlsxFile -Path $xlsxPath -Sheets $sheetSpecs
 Write-Host "Wrote $xlsxPath ($([math]::Round((Get-Item $xlsxPath).Length / 1KB, 1)) KB)"
 
-# ---------------------------------------------------------------------------
-# EMAIL
-# ---------------------------------------------------------------------------
-# Distinct users are counted with a set, not by summing per-env figures: the
-# same person appearing in two environments must count once in the total.
+# ---- email ----
+# A set, not a sum: someone active in two envs counts once.
 $allUsers    = New-Object 'System.Collections.Generic.HashSet[string]'
 $grandLogins = 0
 $rowsHtml    = ''
@@ -696,7 +651,7 @@ $totalRow =
     "<td style=`"padding:8px 12px;border-top:2px solid #305496;text-align:right;`">$grandUserCell</td>" +
     "</tr>"
 
-# Busiest users across every environment in the report.
+
 $topHtml = ''
 if ($IncludeUsers) {
     $everyEvent = @()

@@ -1,14 +1,5 @@
-# =============================================================================
-# Scheduled monthly Guidewire login report.
-# Queries Loki for "User Login" events per environment, builds an Excel file,
-# emails it, and stashes the xlsx as a build artifact.
-#
-# Implemented in PowerShell so the agent needs no Python, no pip packages and no
-# PowerShell Gallery access -- the .xlsx is written directly as OOXML.
-#
-# Runs 06:00 UTC on the 1st of each month -> reports the previous calendar month.
-# Register as its own pipeline (Pipelines -> New -> Existing YAML file).
-# =============================================================================
+# Monthly Guidewire login report: Loki -> Excel -> email.
+# PowerShell, so the agent needs no Python, pip or PSGallery access.
 
 # NO schedules: block here on purpose.
 #
@@ -23,8 +14,7 @@ pr: none
 
 name: 'GW-LoginReport-$(Date:yyyyMMdd).$(Rev:r)'
 
-# Which month to report. Blank -- the normal case, including every scheduled
-# run -- means the current month. Set it to back-fill or re-issue an older one.
+# Blank (the normal case) means the current month. Set it to back-fill.
 parameters:
 - name: testMonth
   displayName: 'Month to report (YYYY-MM). Leave blank for the current month.'
@@ -68,7 +58,7 @@ steps:
     OUTPUT_DIR: '$(Build.ArtifactStagingDirectory)'
     TEST_MONTH: ${{ parameters.testMonth }}
 
-# Keep a copy of the spreadsheet attached to the run for re-download/audit.
+# Keep a copy on the run for re-download.
 - task: PublishBuildArtifacts@1
   displayName: 'Publish xlsx as build artifact'
   condition: succeededOrFailed()

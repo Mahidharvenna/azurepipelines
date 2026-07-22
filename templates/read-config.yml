@@ -1,30 +1,9 @@
-# =============================================================================
-# ReadConfig stage -- single source of truth for "what deploys where, from which
-# branch".
+# Resolves branch + product set for an env from config/branches.json and
+# publishes them as output variables for the Build and Deploy stages.
 #
-# Reads config/branches.json, looks up the given env label (e.g. DEV2, QA7), and
-# publishes two output variables per product:
-#   branch_<comp>  -> the release branch to build from
-#   run_<comp>     -> 'true'/'false': whether to build+deploy this product
-#
-# Config shape (one branch per env; all centres normally share it):
-#   "QA7": {
-#     "branch":   "maintenance/rel-2026.08",   <- applies to every product listed
-#     "products": ["pc", "bc", "cc"],          <- what is in this release
-#     "overrides": { "bc": "feature/x" }       <- optional, rare exceptions
-#   }
-#
-# Product selection rules:
-#   * A product not in "products" NEVER runs for that env.
-#   * useConfigProducts = true  -> run every product in "products" (scheduled runs)
-#   * useConfigProducts = false -> run only the ticked checkboxes (manual runs)
-#
-# Why a runtime read? ADO resolves stages/resources/schedules at COMPILE time and
-# cannot read a repo file then. But the branch is only APPLIED at runtime (git
-# checkout in gw-build.yml), so resolving it in a runtime step works cleanly on
-# ADO Server 2022 RTW. NOTE: cron schedules cannot come from this file -- they
-# must be literal YAML in the wrapper pipeline.
-# =============================================================================
+# Runtime, not compile time: ADO cannot read a repo file while resolving stages.
+# The branch is only APPLIED at runtime (git checkout), so this works. Cron
+# schedules cannot come from here -- they must be literal YAML.
 
 parameters:
 - name: envLabel                 # e.g. DEV2, QA7 -- key into branches.json
@@ -57,9 +36,9 @@ stages:
     steps:
     - checkout: self             # the repo holding config/branches.json
     - task: PowerShell@2
-      name: cfg
+      name: cfg                  # step name -> output var prefix, e.g. cfg.branch_pc
       env:
-        SYSTEM_ACCESSTOKEN: $(System.AccessToken)                  # step name -> output var prefix (cfg.branch_pc, cfg.run_pc)
+        SYSTEM_ACCESSTOKEN: $(System.AccessToken)
       displayName: 'Resolve config for ${{ parameters.envLabel }}'
       inputs:
         targetType: inline
@@ -76,12 +55,8 @@ stages:
             exit 1
           }
 
-          # --- Schedule gate -------------------------------------------------
-          # A scheduled run honours "schedule.enabled". Manual runs ignore it,
-          # so you can always deploy on demand even while the schedule is paused.
-          # (The cron itself lives in the wrapper YAML -- ADO resolves schedules
-          # at compile time and cannot read this file. The "cron" value here is
-          # a human-readable record that must mirror the wrapper.)
+          # Scheduled runs honour schedule.enabled; manual runs ignore it, so
+          # on-demand deploys still work while a schedule is paused.
           $isScheduled = "$(Build.Reason)" -eq 'Schedule'
           $sched = $envCfg.schedule
           $schedEnabled = $true
@@ -118,16 +93,13 @@ stages:
 
           $overrides = $envCfg.overrides
 
-          # gwb.bat genDataDictionary is disabled in classic almost everywhere.
-          # It is an ENV-level switch: when on, every centre in this release
-          # generates the data dictionary. Absent = off.
+          # Env-level switch: when on, every centre generates the dictionary.
           $genDD = $false
           if ($null -ne $envCfg.genDataDictionary) { $genDD = [bool]$envCfg.genDataDictionary }
           Write-Host "##vso[task.setvariable variable=genDataDictionary;isOutput=true]$($genDD.ToString().ToLower())"
 
-          # Teams notification, per env. The config carries whether to notify and
-          # WHICH variable holds the webhook -- never the URL itself, which is a
-          # write credential for that channel and must not live in git.
+          # Config names the secret holding the webhook, never the URL itself --
+          # a webhook URL is a write credential for that channel.
           $notify = $envCfg.notify
           $notifyEnabled = $false
           $notifyVar = 'TEAMS_WEBHOOK'
@@ -154,10 +126,8 @@ stages:
           Write-Host "Teams notify   : $notifyEnabled  (webhook from variable '$notifyVar')"
           Write-Host "----------------------------------------------------"
 
-          # --- Change detection -------------------------------------------
-          # Skip a centre whose branch head has already been deployed to this
-          # env. The record is a build TAG (<ENV>-<comp>-<sha8>), so nothing is
-          # stored outside ADO and no schema change is needed.
+          # Change detection: skip a centre whose branch head is already
+          # deployed here. The record is a build tag, so nothing lives outside ADO.
           $skipUnchanged = $false
           if ($null -ne $envCfg.skipIfUnchanged) { $skipUnchanged = [bool]$envCfg.skipIfUnchanged }
           $force = "${{ parameters.forceRebuild }}".ToLower() -eq 'true'

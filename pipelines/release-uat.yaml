@@ -11,8 +11,8 @@ schedules:
   branches:
     include: [master]
   always: false
-# Pause/resume this schedule WITHOUT editing YAML: set schedule.enabled = false
-# for the target env in config/branches.json. Manual runs ignore that toggle.
+# Pause without editing YAML: set schedule.enabled = false for the env in
+# config/branches.json. Manual runs ignore that toggle.
 
 trigger: none
 pr: none
@@ -22,11 +22,8 @@ parameters:
   displayName: 'UAT instance (blank = the unnumbered UAT environment)'
   type: string
   default: '1'
-  # Deliberately NOT a picklist. ADO rejects an empty string in a `values:` list
-  # ("Unexpected value ''"), and some estates have an unnumbered UAT alongside
-  # UAT1..UATn. Free text is the only way to allow blank. Whatever is entered
-  # must have a matching <TIER><INSTANCE>-<COMP> service connection and an
-  # ADO environment, or the deploy fails to resolve.
+  # Free text, not a picklist: ADO rejects '' in a values: list, and a blank
+  # instance is how an unnumbered UAT is selected.
 
 - name: useConfigProducts
   displayName: 'Deploy everything config lists for this env (untick to pick manually)'
@@ -51,14 +48,12 @@ parameters:
   type: boolean
   default: false
 
-# Bypass change detection and deploy even if this commit is already live.
 - name: forceRebuild
   displayName: 'Force rebuild (deploy even if the commit is already live)'
   type: boolean
   default: false
 
-# Teams notification. Off until a webhook is added to the variable group;
-# the Notify stage still appears in the run, marked skipped.
+# Off until a webhook is set; the Notify stage still shows, marked skipped.
 - name: notifyTeams
   displayName: 'Post a summary to Teams'
   type: boolean

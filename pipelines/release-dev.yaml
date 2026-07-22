@@ -1,15 +1,9 @@
 # =============================================================================
 # MyOrg -- DEV release pipeline (wrapper: build + deploy in one run)
 #
-# The release branch is NEVER typed here -- it is read at run time from
-# config/branches.json, keyed by env label (DEV1, DEV2, ...).
-#
-# SCHEDULES: cron must be literal YAML (ADO resolves schedules at compile time
-# and cannot read a config file). A scheduled run uses the parameter DEFAULTS
-# below -- i.e. envInstance '1' and useConfigProducts=true, which deploys
-# whatever config/branches.json lists for that env.
-# To auto-deploy a DIFFERENT instance on its own cadence, copy this file and
-# change the default envInstance + cron.
+# The release branch is read at run time from config/branches.json, keyed by
+# env label. A scheduled run uses the defaults below, so one wrapper schedules
+# one instance -- copy it and change the default to schedule another.
 # =============================================================================
 
 schedules:
@@ -18,8 +12,8 @@ schedules:
   branches:
     include: [master]
   always: false                       # skip if no commits to master since last run
-# Pause/resume this schedule WITHOUT editing YAML: set schedule.enabled = false
-# for the target env in config/branches.json. Manual runs ignore that toggle.
+# Pause without editing YAML: set schedule.enabled = false for the env in
+# config/branches.json. Manual runs ignore that toggle.
 
 trigger: none
 pr: none
@@ -54,14 +48,12 @@ parameters:
   type: boolean
   default: false
 
-# Bypass change detection and deploy even if this commit is already live.
 - name: forceRebuild
   displayName: 'Force rebuild (deploy even if the commit is already live)'
   type: boolean
   default: false
 
-# Teams notification. Off until a webhook is added to the variable group;
-# the Notify stage still appears in the run, marked skipped.
+# Off until a webhook is set; the Notify stage still shows, marked skipped.
 - name: notifyTeams
   displayName: 'Post a summary to Teams'
   type: boolean

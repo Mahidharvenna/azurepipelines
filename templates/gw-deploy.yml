@@ -1,12 +1,5 @@
-# =============================================================================
-# Reusable deploy template -- 1:1 translation of a typical GW deployment task
-# group. 15 tasks: pre-deploy DB write, shutdown, cleanup, copy WAR, configure,
-# start, log on failure, post-deploy DB write.
-#
-# The release branch arrives as a runtime expression (branchExpr) resolved by
-# the ReadConfig stage; it is surfaced as the runtime variable releaseBranch
-# and used in the tracking-DB bookkeeping below.
-# =============================================================================
+# Per-product deploy: 16 steps, translated from the classic GW_TEM_Deployment
+# task group. The release branch arrives as a runtime expression from ReadConfig.
 
 parameters:
 - name: comp                    # pc, bc, cc, ab  (CM uses 'ab' for legacy reasons)
@@ -35,9 +28,8 @@ parameters:
 - name: dbSchema                # SQL schema owning the tracking tables
   type: string
   default: 'dbo'
-# Column widths for the tracking tables. A YAML pipeline has no Release.*
-# variables, so these values come from Build.* and run longer than the classic
-# release equivalents -- cap them rather than letting SQL reject the statement.
+# YAML has no Release.* variables, so these come from Build.* and run longer
+# than the columns expect. Cap rather than let SQL reject the whole statement.
 - name: maxReleaseName
   type: number
   default: 50
@@ -75,8 +67,7 @@ jobs:
       deploy:
         steps:
 
-        # Note: DownloadBuildArtifacts@1 is not available on ADO Server 2022 RTW;
-        # use @0 which has been stable on-prem for years.
+        # @1 is unavailable on ADO Server 2022 RTW.
         - task: DownloadBuildArtifacts@0
           displayName: 'Prep 1/2  Download ${{ parameters.artifactName }}'
           inputs:
@@ -85,8 +76,7 @@ jobs:
             artifactName: '${{ parameters.artifactName }}'
             downloadPath: '$(Pipeline.Workspace)'
 
-        # Fail here -- before anything on the server is touched -- if the WAR
-        # is not where we expect. Cheap insurance against a half-applied deploy.
+        # Fail before anything on the server is touched.
         - task: PowerShell@2
           displayName: 'Prep 2/2  Verify WAR present in artifact'
           inputs:
@@ -112,10 +102,8 @@ jobs:
             errorActionPreference: stop
             failOnStderr: false
             script: |
-              # Classic writes $(Build.SourceBranchName) -- the TRAILING SEGMENT only
-              # (maintenance/rel-2026.06 -> rel-2026.06). Existing rows use that
-              # form, so match it or the previous-branch comparison never hits and
-              # every run reports "SourceBranch Changed".
+              # Classic stores the trailing segment only (a/b/c -> c). Match it,
+              # or the previous-branch comparison never hits.
               $branchShort = ("$(releaseBranch)" -split '/')[-1]
 
               $connectionString = "Server=$(DBINSTANCE);Database=$(DBNAME);user=$(DBUSER);password=$(DBPASS)"
@@ -141,9 +129,7 @@ jobs:
                 } finally { $connection.Close() }
               }
 
-              # Same capping as the post-deploy step -- a YAML pipeline's Build.*
-              # values are wider than the classic Release.* ones these columns
-              # were sized for.
+              # Build.* values are wider than the columns expect.
               function Trunc {
                 param([string]$Value, [int]$Max, [string]$Label)
                 if ($null -eq $Value) { return '' }
@@ -251,20 +237,11 @@ jobs:
             readyTimeout: '20000'
 
         # --- 7. Copy new WAR to server ---
-        # The glob is deliberately anchored at the artifact ROOT, not at a
-        # hardcoded dist/wars/TomcatDbcp path: a multi-repo checkout can nest
-        # the sources one level deeper, which shifts the path inside the
-        # artifact. flattenFolders drops the WAR straight into webapps/.
-        #
-        # failOnEmptySource MUST stay true. With it false, a path mismatch
-        # copies nothing, the task still goes green, and the steps below then
-        # delete the webapp and unzip a WAR that was never delivered -- which
-        # surfaces much later as OSGi/NoClassDefFoundError at startup.
-        #
-        # The filename is <comp>.war, i.e. the DEPLOY comp. For ContactManager
-        # that is 'ab.war' (legacy AddressBook name) even though the artifact is
-        # 'cm-drop' built from the CM repo. If your CM build emits 'cm.war'
-        # instead, this fails loudly here rather than half-deploying.
+        # Glob from the artifact root, not a fixed path: a multi-repo checkout
+        # can nest sources a level deeper.
+        # failOnEmptySource MUST stay true -- with it false a path mismatch copies
+        # nothing, goes green, and the steps below then delete the webapp and
+        # unzip a WAR that never arrived. Surfaces as OSGi errors at startup.
         - task: CopyFilesOverSSH@0
           displayName: ' 7/16  Copy WAR to server'
           inputs:
@@ -324,20 +301,13 @@ jobs:
 
               BASE_DIR="${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}/modules/configuration"
 
-              # The character class MUST be [^;"]*. The password sits inside a
-              # JDBC URL attribute, so the match has to stop at the ';' or '"'
-              # that terminates it. A broader class such as [^=]* runs past the
-              # closing quote, destroys the attribute, and the XML parser then
-              # swallows the next element's '<' -- surfacing much later as
-              #   SAXParseException: jdbc-url must not contain the '<' character
-              # with PolicyCenter unable to start.
-              #
-              # The '"$var"' quoting is also deliberate: it keeps the regex
-              # literal while still interpolating the password safely.
+              # [^;"]* is load-bearing: the password sits inside a JDBC URL
+              # attribute, so the match must stop at the ';' or '"'. A broader
+              # class runs past the closing quote and corrupts the XML, which
+              # surfaces later as 'jdbc-url must not contain <' at startup.
               sed -i 's/Password=[^;"]*/Password='"$gwruser_dbpass"'/' "$BASE_DIR/config/database-config.xml"
 
-              # Property files are per centre -- do not apply one centre's list
-              # to another, since s/guidewire/<pass>/g is a blunt global replace.
+              # Per centre -- s/guidewire/<pass>/g is a blunt global replace.
               case "${{ parameters.comp }}" in
                 pc)
                   if [ -f "$BASE_DIR/gsrc/ext/DBintegration/config/DBintegration.properties" ]; then
@@ -362,14 +332,9 @@ jobs:
             readyTimeout: '20000'
 
         # --- 11. Remove prod mail domains from ScriptParameters.xml ---
-        # SAFETY STEP. Classic does NOT swap prod for a non-prod domain -- it
-        # STRIPS the prod domain(s) entirely, so "someone@prod.example" becomes
-        # "someone", an unsendable address. That is what stops a non-prod
-        # environment from emailing real recipients.
-        #
-        # List EVERY prod mail domain your org uses here; each becomes its own
-        # `-e 's/@domain//g'`. The trailing cat echoes the result to the log so
-        # you can confirm the addresses were neutralised.
+        # SAFETY: strips prod mail domains entirely (someone@prod -> someone,
+        # unsendable) so a non-prod env cannot email real recipients. List EVERY
+        # prod domain -- a missed one means live mail from DEV/QA.
         - task: SSH@0
           displayName: '11/16  Strip prod mail domains'
           inputs:
@@ -391,9 +356,7 @@ jobs:
             interpreterCommand: '/bin/bash'
             inline: |
               LOG4J=${{ parameters.catalinaBase }}/webapps/${{ parameters.comp }}/modules/configuration/config/logging/log4j2.xml
-              # Classic behaviour: replace 'env' with the tier ONLY on the
-              # guidewire.logDirectory line (line-addressed sed), then echo that
-              # line to confirm. A whole-file sed would risk touching other paths.
+              # Line-addressed: only rewrites the guidewire.logDirectory line.
               sed -i '/<Property name="guidewire.logDirectory">/s/env/${{ parameters.env }}/g' $LOG4J
               cat $LOG4J | grep -e '<Property name="guidewire.logDirectory"' || true
             readyTimeout: '20000'
@@ -467,11 +430,7 @@ jobs:
                 } finally { $connection.Close() }
               }
 
-              # A YAML pipeline has no Release.* variables, so the values written
-              # here come from Build.* and are materially longer than the classic
-              # release equivalents (e.g. 'MyOrg-DEV1-20260101.2' vs 'DEV1-PC').
-              # Cap them to the column widths rather than letting SQL reject the
-              # whole statement. Adjust to match your schema:
+              # Widths come from parameters -- check yours with:
               #   SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH
               #   FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='ReleaseNotes';
               $MAX_RELEASENAME = ${{ parameters.maxReleaseName }}
@@ -554,10 +513,8 @@ jobs:
               "@
 
         # --- 16. Record the deployed commit -----------------------------------
-        # Tags this build <ENV>-<comp>-<sha8>. ReadConfig looks for that tag on a
-        # previous successful run to decide whether anything actually changed, so
-        # this is what makes "no changes since last deployment" work. Tagging is
-        # best-effort: a failure here must not fail a good deployment.
+        # Tags the build <ENV>-<comp>-<sha8>; ReadConfig looks for it to decide
+        # whether anything changed. Best-effort -- must not fail a good deploy.
         - task: PowerShell@2
           displayName: '16/16  Record deployed commit'
           condition: succeeded()

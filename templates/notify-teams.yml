@@ -1,21 +1,7 @@
-# =============================================================================
-# Teams notification stage -- posts a deployment summary to an incoming webhook.
-#
-# DISABLED BY DEFAULT. The stage is always present in the pipeline graph but
-# skips unless notifyTeams is true, so it is visible and discoverable rather
-# than hidden until someone remembers it exists.
-#
-# To turn it on:
-#   1. Create an incoming webhook on the target Teams channel
-#      (channel -> ... -> Connectors -> Incoming Webhook, or a Power Automate
-#      "When a Teams webhook request is received" flow on newer tenants)
-#   2. Add the URL to the pipeline's variable group as TEAMS_WEBHOOK
-#      -- mark it secret; a webhook URL is a write credential for that channel
-#   3. Set notifyTeams: true on the wrapper pipeline
-#
-# Uses plain Invoke-RestMethod rather than a marketplace task, so it works on
-# ADO Server without installing an extension.
-# =============================================================================
+# Posts a deployment summary to a Teams incoming webhook. Off by default: the
+# stage is always present but skips unless notifyTeams is true, so it stays
+# discoverable. Uses Invoke-RestMethod, so no marketplace extension is needed.
+# See reports/README.md for setup.
 
 parameters:
 - name: envLabel                 # e.g. DEV1 -- shown in the message
@@ -34,20 +20,18 @@ stages:
   - ReadConfig
   - Build
   - Deploy
-  # always() so a FAILED deploy still notifies; the boolean gates it off.
-  # The parameter substitutes as a literal True/False, which a condition accepts.
+  # always() so a failed deploy still notifies; the boolean gates it off.
   condition: and(always(), ${{ parameters.notifyTeams }})
   jobs:
   - job: PostToTeams
     displayName: 'Post deployment summary'
-    # Stage gate above is the pipeline-wide switch; this is the per-env switch
-    # from config/branches.json -> notify.enabled.
+    # Per-env switch, from config/branches.json -> notify.enabled.
     condition: eq(stageDependencies.ReadConfig.Read.outputs['cfg.notify_enabled'], 'true')
     pool:
       name: ${{ parameters.poolName }}
     variables:
-      # NOTE: at JOB level, `dependencies` means other jobs in THIS stage.
-      # Referring to another STAGE requires `stageDependencies`.
+      # At job level `dependencies` means jobs in THIS stage -- cross-stage
+      # needs stageDependencies.
       buildResult:  $[ stageDependencies.Build.result ]
       deployResult: $[ stageDependencies.Deploy.result ]
       branchPc:     $[ stageDependencies.ReadConfig.Read.outputs['cfg.branch_pc'] ]
@@ -63,9 +47,8 @@ stages:
     - checkout: none
     - task: PowerShell@2
       displayName: 'Post to Teams channel'
-      # Secrets are NOT auto-mapped into the environment, so every webhook the
-      # config may name has to be declared here. Add a line per channel.
-      # An undeclared/absent variable stays as literal '$(NAME)' and is caught below.
+      # Secrets are not auto-mapped, so every webhook the config may name must
+      # be declared here. Add a line per channel.
       env:
         TEAMS_WEBHOOK:     $(TEAMS_WEBHOOK)
         TEAMS_WEBHOOK_DEV: $(TEAMS_WEBHOOK_DEV)
@@ -75,7 +58,7 @@ stages:
         targetType: inline
         errorActionPreference: stop
         script: |
-          # Which secret holds the URL comes from config; the URL itself never does.
+          # Config names the secret; the URL itself never lives in config.
           $varName = "$(webhookVar)"
           if ([string]::IsNullOrWhiteSpace($varName)) { $varName = 'TEAMS_WEBHOOK' }
           $webhook = [Environment]::GetEnvironmentVariable($varName)
@@ -91,8 +74,7 @@ stages:
           $deploy   = "$(deployResult)"
           $build    = "$(buildResult)"
 
-          # Deploy result dominates; build result is the fallback when Deploy
-          # never ran (e.g. the build failed, so Deploy was skipped).
+          # Deploy result dominates; build result is the fallback.
           if     ($deploy -eq 'Succeeded')           { $status = 'Succeeded' }
           elseif ($deploy -eq 'SucceededWithIssues') { $status = 'Succeeded with issues' }
           elseif ($build  -ne 'Succeeded')           { $status = 'Build failed' }
@@ -121,8 +103,7 @@ stages:
 
           $runUrl = "$(System.CollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)"
 
-          # Legacy MessageCard format -- accepted by both classic Incoming
-          # Webhook connectors and Power Automate webhook triggers.
+          # MessageCard: accepted by both classic connectors and Power Automate.
           $payload = @{
             '@type'    = 'MessageCard'
             '@context' = 'https://schema.org/extensions'
