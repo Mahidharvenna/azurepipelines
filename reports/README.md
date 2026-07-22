@@ -11,7 +11,23 @@ same `|= "User Login"` line match — so the report reconciles with the dashboar
 | File | Purpose |
 |---|---|
 | `gw-monthly-login-report.yaml` | The scheduled pipeline (cron: 1st of month, 06:00 UTC) |
-| `monthly_report.py` | Queries Loki, builds the xlsx, emails it |
+| `monthly_report.ps1` | **Used by the pipeline.** Queries Loki, builds the xlsx, emails it |
+| `monthly_report.py` | Equivalent in Python, if you would rather use that |
+
+### Why PowerShell
+
+The pipeline runs the **PowerShell** version because it needs nothing installed
+on the agent: no Python runtime, no `pip` packages, no PowerShell Gallery access
+and no Excel. The `.xlsx` is written directly as OOXML (a zip of XML parts) via
+`System.IO.Compression`, which ships with .NET.
+
+That matters on a locked-down build agent. `UsePythonVersion@0` in particular is
+a trap on self-hosted agents -- it only searches the agent tool cache
+(`_work/_tool`), not a normal machine install, so it fails with *"did not match
+any version in Agent.ToolsDirectory"* even when Python is present.
+
+The Python version is kept for sites that already have Python plus `requests`
+and `openpyxl`. To use it, swap the pipeline's script step back.
 
 ## One-time setup
 
@@ -71,17 +87,8 @@ their sum is the **Summary** total.
 - **Counts login *events*, not unique users.** A user logging in 5× counts as 5.
   For unique users you'd extract the username from the log line via `| regexp`.
 - **Agent network**: the build agent must reach both Loki and the SMTP relay.
-- **Python on the agent**: Python 3 must be installed and on `PATH`, with
-  `requests` and `openpyxl` installable via pip.
-
-  `UsePythonVersion@0` is deliberately **not** used: it searches only the agent's
-  tool cache (`_work/_tool`), not a normal machine install, so on a self-hosted
-  agent it fails with *"did not match any version in Agent.ToolsDirectory"* even
-  when Python is present. The pipeline resolves the interpreter itself, trying
-  `python`, `python3`, then `py`.
-
-  If it reports none found: install Python 3 on the agent, tick **Add python.exe
-  to PATH**, then **restart the agent service** so it picks up the new PATH.
+- **Nothing to install on the agent.** The PowerShell version needs only
+  Windows PowerShell 5.1, which is present by default.
 - **Loki retention**: querying "last month" on the 1st needs ≥ ~32 days retention.
   Bump `retention_period` to `1080h` (45d) for safety.
 - **TLS**: if Loki is internal HTTPS and the agent doesn't trust the cert, set

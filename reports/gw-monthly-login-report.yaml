@@ -3,6 +3,9 @@
 # Queries Loki for "User Login" events per environment, builds an Excel file,
 # emails it, and stashes the xlsx as a build artifact.
 #
+# Implemented in PowerShell so the agent needs no Python, no pip packages and no
+# PowerShell Gallery access -- the .xlsx is written directly as OOXML.
+#
 # Runs 06:00 UTC on the 1st of each month -> reports the previous calendar month.
 # Register as its own pipeline (Pipelines -> New -> Existing YAML file).
 # =============================================================================
@@ -37,43 +40,13 @@ steps:
   clean: true
   persistCredentials: false
 
-# NOTE: UsePythonVersion@0 is deliberately NOT used. That task only searches the
-# agent's TOOL CACHE (_work/_tool), not Python installed normally on the machine,
-# so on a self-hosted agent it fails with
-#   "Version spec 3.x ... did not match any version in Agent.ToolsDirectory"
-# even when Python is present. We locate the interpreter ourselves.
-- powershell: |
-    $exe = $null
-    foreach ($c in 'python', 'python3', 'py') {
-      $cmd = Get-Command $c -ErrorAction SilentlyContinue
-      if (-not $cmd) { continue }
-      $ver = (& $c --version 2>&1) -join ' '
-      if ($LASTEXITCODE -eq 0 -and $ver -match 'Python 3') {
-        $exe = $cmd.Source
-        Write-Host "Using $ver  ($exe)"
-        break
-      }
-    }
-    if (-not $exe) {
-      Write-Error @"
-    No Python 3 interpreter found on this agent.
-
-    Install Python 3 on the agent machine and tick 'Add python.exe to PATH',
-    then restart the agent service so it picks up the new PATH.
-
-    Checked: python, python3, py
-    "@
-      exit 1
-    }
-    Write-Host "##vso[task.setvariable variable=PYTHON_EXE]$exe"
-  displayName: 'Locate Python 3'
-
-- script: '"$(PYTHON_EXE)" -m pip install --upgrade pip requests openpyxl'
-  displayName: 'Install Python dependencies'
-
-- script: '"$(PYTHON_EXE)" reports/monthly_report.py'
+- task: PowerShell@2
   displayName: 'Generate and email login report'
-  workingDirectory: '$(Build.SourcesDirectory)'
+  inputs:
+    targetType: filePath
+    filePath: 'reports/monthly_report.ps1'
+    errorActionPreference: stop
+    failOnStderr: false
   env:
     # --- Loki ---
     LOKI_URL:        $(LOKI_URL)
@@ -88,7 +61,7 @@ steps:
     # --- Report ---
     FROM_ADDR: $(FROM_ADDR)
     TO_ADDRS:  $(TO_ADDRS)
-    ENVS:      $(ENVS)                       # e.g. DEV1,QA1,UAT1,PROD1  (match Loki env label casing)
+    ENVS:      $(ENVS)                       # e.g. DEV1,QA7  (match Loki env label casing)
     PRODUCTS:  $(PRODUCTS)                   # e.g. pc   (or pc,bc,cc,cm)
     OUTPUT_DIR: '$(Build.ArtifactStagingDirectory)'
     TEST_MONTH: ${{ parameters.testMonth }}
