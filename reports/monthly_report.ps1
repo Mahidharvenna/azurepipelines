@@ -31,6 +31,10 @@ $LokiProject = Get-EnvOr 'LOKI_PROJECT' 'myproject'
 # it, so the window is fetched in chunks and stitched together.
 $ChunkDays   = [int](Get-EnvOr 'LOKI_MAX_QUERY_DAYS' '7')
 $VerifyTls   = Get-EnvBool 'LOKI_VERIFY_TLS' $true
+# Loki is an internal host, so the corporate proxy should not be in the path.
+# Agents differ: some have a proxy configured and return a Squid "Access Denied"
+# page instead of reaching it. Set false if your Loki genuinely sits behind one.
+$BypassProxy = Get-EnvBool 'BYPASS_PROXY' $true
 
 $SmtpHost = Get-EnvOr 'SMTP_HOST'
 $SmtpPort = [int](Get-EnvOr 'SMTP_PORT' '25')
@@ -109,6 +113,14 @@ Write-Host ""
 
 # ---- loki ----
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+if ($BypassProxy) {
+    # Windows PowerShell 5.1 has no -NoProxy on Invoke-RestMethod; clearing the
+    # default proxy is the equivalent and also covers later .NET web calls.
+    [System.Net.WebRequest]::DefaultWebProxy = $null
+    Write-Host "Proxy            : bypassed (BYPASS_PROXY=true)"
+} else {
+    Write-Host "Proxy            : system default"
+}
 if (-not $VerifyTls) {
     Write-Host "LOKI_VERIFY_TLS is false -- certificate validation disabled for this run."
     if (-not ('TrustAllCertsPolicy' -as [type])) {
@@ -245,7 +257,7 @@ function Get-DailyCounts {
             if ($detail -match 'exceeds the limit') {
                 throw "Loki rejected the query window for $EnvLabel/$Product. Lower LOKI_MAX_QUERY_DAYS (currently $ChunkDays).`nLoki said: $detail"
             }
-            throw "Loki query failed for $EnvLabel/$Product ($($chunkFrom.ToString('yyyy-MM-dd')) to $($chunkTo.ToString('yyyy-MM-dd'))): $detail`nQuery: $query"
+            throw "Loki query failed for $EnvLabel/$Product ($($chunkFrom.ToString('yyyy-MM-dd')) to $($chunkTo.ToString('yyyy-MM-dd'))):`n$(Format-LokiError $detail $uri)`nQuery: $query"
         }
 
         $result = $resp.data.result
@@ -265,6 +277,22 @@ function Get-DailyCounts {
 }
 
 # ---- environment discovery ----
+function Format-LokiError {
+    param([string]$Detail, [string]$Uri)
+    if ($Detail -match 'squid|Access Denied|cache administrator|could not be retrieved') {
+        return @"
+A proxy refused the request to $Uri.
+
+The agent is routing internal traffic through the corporate proxy. Either:
+  * leave BYPASS_PROXY=true (the default) so the proxy is skipped, or
+  * pin this pipeline to an agent that reaches Loki directly.
+
+Proxy response: $Detail
+"@
+    }
+    return $Detail
+}
+
 function Get-DiscoveredEnvs {
     # Chunked like the data queries -- this endpoint has the same length limit.
     # Windows are unioned, so a briefly-active env is still found.
@@ -291,7 +319,7 @@ function Get-DiscoveredEnvs {
             if ($detail -match 'exceeds the limit') {
                 throw "Loki rejected the discovery window. Lower LOKI_MAX_QUERY_DAYS (currently $ChunkDays).`nLoki said: $detail"
             }
-            throw "Could not discover environments from Loki ($uri): $detail`nSet ENVS to an explicit list instead of ALL."
+            throw "Could not discover environments from Loki ($uri):`n$(Format-LokiError $detail $uri)"
         }
         foreach ($v in @($resp.data)) {
             if ($v) { [void]$found.Add([string]$v) }

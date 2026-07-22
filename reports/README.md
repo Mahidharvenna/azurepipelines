@@ -38,6 +38,7 @@ Pipelines → Library → **+ Variable group** → name it **`gw-reports-secrets
 |---|---|---|
 | `LOKI_URL` | `https://your-loki-host.example.com:3100` | no |
 | `LOKI_VERIFY_TLS` | `true` (set `false` if agent rejects the cert) | no |
+| `BYPASS_PROXY` | *(optional, default `true`)* skip the system proxy — see below | no |
 | `LOKI_PROJECT` | `myproject` (your Loki `project` label value) | no |
 | `SMTP_HOST` | `smtp.example.com` | no |
 | `SMTP_PORT` | `25` | no |
@@ -234,6 +235,29 @@ Loki limits entries per query (`LOKI_LOG_LIMIT`, default 5000). Chunking usually
 keeps each window under it, but a busy environment can still hit it — the run
 warns and tells you to lower `LOKI_MAX_QUERY_DAYS`. **Aggregate totals are
 unaffected**; only the per-user detail would be short.
+
+## Proxies and agent variation
+
+Loki is an internal host, so `BYPASS_PROXY` defaults to **true** and the script
+clears the system proxy before calling it. Without that, an agent configured to
+use the corporate proxy gets a refusal page rather than Loki:
+
+```
+ERROR: The requested URL could not be retrieved
+Access Denied. Access control configuration prevents your request ...
+Generated ... by proxy-host (squid/4.15)
+```
+
+The script recognises that response and says so, rather than surfacing the raw
+proxy page.
+
+**Agents are not interchangeable here.** Whether a proxy is configured, whether
+the internal CA is trusted, and whether the SMTP relay allowlists the host all
+vary by agent — the same pipeline can pass on one and fail on another. If runs
+are intermittent, check which agent each landed on before suspecting the script,
+and consider pinning the pipeline to one known-good agent with a demand.
+
+Set `BYPASS_PROXY=false` only if your Loki genuinely sits behind a proxy.
 
 ## Loki query length limit
 
