@@ -71,8 +71,17 @@ their sum is the **Summary** total.
 - **Counts login *events*, not unique users.** A user logging in 5× counts as 5.
   For unique users you'd extract the username from the log line via `| regexp`.
 - **Agent network**: the build agent must reach both Loki and the SMTP relay.
-- **Python on agent**: `UsePythonVersion@0` selects an installed Python; if the
-  agent has none, install Python 3 on it once.
+- **Python on the agent**: Python 3 must be installed and on `PATH`, with
+  `requests` and `openpyxl` installable via pip.
+
+  `UsePythonVersion@0` is deliberately **not** used: it searches only the agent's
+  tool cache (`_work/_tool`), not a normal machine install, so on a self-hosted
+  agent it fails with *"did not match any version in Agent.ToolsDirectory"* even
+  when Python is present. The pipeline resolves the interpreter itself, trying
+  `python`, `python3`, then `py`.
+
+  If it reports none found: install Python 3 on the agent, tick **Add python.exe
+  to PATH**, then **restart the agent service** so it picks up the new PATH.
 - **Loki retention**: querying "last month" on the 1st needs ≥ ~32 days retention.
   Bump `retention_period` to `1080h` (45d) for safety.
 - **TLS**: if Loki is internal HTTPS and the agent doesn't trust the cert, set

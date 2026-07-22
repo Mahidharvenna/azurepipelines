@@ -37,16 +37,41 @@ steps:
   clean: true
   persistCredentials: false
 
-- task: UsePythonVersion@0
-  displayName: 'Use Python 3.x'
-  inputs:
-    versionSpec: '3.x'
-    addToPath: true
+# NOTE: UsePythonVersion@0 is deliberately NOT used. That task only searches the
+# agent's TOOL CACHE (_work/_tool), not Python installed normally on the machine,
+# so on a self-hosted agent it fails with
+#   "Version spec 3.x ... did not match any version in Agent.ToolsDirectory"
+# even when Python is present. We locate the interpreter ourselves.
+- powershell: |
+    $exe = $null
+    foreach ($c in 'python', 'python3', 'py') {
+      $cmd = Get-Command $c -ErrorAction SilentlyContinue
+      if (-not $cmd) { continue }
+      $ver = (& $c --version 2>&1) -join ' '
+      if ($LASTEXITCODE -eq 0 -and $ver -match 'Python 3') {
+        $exe = $cmd.Source
+        Write-Host "Using $ver  ($exe)"
+        break
+      }
+    }
+    if (-not $exe) {
+      Write-Error @"
+    No Python 3 interpreter found on this agent.
 
-- script: python -m pip install --upgrade pip requests openpyxl
+    Install Python 3 on the agent machine and tick 'Add python.exe to PATH',
+    then restart the agent service so it picks up the new PATH.
+
+    Checked: python, python3, py
+    "@
+      exit 1
+    }
+    Write-Host "##vso[task.setvariable variable=PYTHON_EXE]$exe"
+  displayName: 'Locate Python 3'
+
+- script: '"$(PYTHON_EXE)" -m pip install --upgrade pip requests openpyxl'
   displayName: 'Install Python dependencies'
 
-- script: python reports/monthly_report.py
+- script: '"$(PYTHON_EXE)" reports/monthly_report.py'
   displayName: 'Generate and email login report'
   workingDirectory: '$(Build.SourcesDirectory)'
   env:
