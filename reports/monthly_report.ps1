@@ -49,10 +49,13 @@ $SmtpUser = Get-EnvOr 'SMTP_USER'
 $SmtpPass = Get-EnvOr 'SMTP_PASS'
 
 $FromAddr = Get-EnvOr 'FROM_ADDR'
-$ToAddrs  = Split-List (Get-EnvOr 'TO_ADDRS')
+# @() at the CALL SITE is required: a function returning a single-element array
+# has it unwrapped to a scalar by the pipeline, and indexing a scalar string
+# gives a [char] rather than the string. @() forces array semantics either way.
+$ToAddrs  = @(Split-List (Get-EnvOr 'TO_ADDRS'))
 # ENVS: a comma-separated list, or the literal ALL to discover every environment
 # that has logs in the reporting window (see Resolve-Environments below).
-$Envs        = Split-List (Get-EnvOr 'ENVS' 'DEV1')
+$Envs        = @(Split-List (Get-EnvOr 'ENVS' 'DEV1'))
 $EnvsExclude = @(Split-List (Get-EnvOr 'ENVS_EXCLUDE') | ForEach-Object { $_.ToUpper() })
 $Products = @(Split-List (Get-EnvOr 'PRODUCTS' 'pc') | ForEach-Object { $_.ToLower() })
 $OutDir   = Get-EnvOr 'OUTPUT_DIR' '.'
@@ -304,13 +307,13 @@ function Sort-EnvNatural { param([string[]]$Names)
 }
 
 $discovered = $false
-if ($Envs.Count -eq 1 -and $Envs[0].ToUpper() -eq 'ALL') {
+if ($Envs.Count -eq 1 -and ([string]$Envs[0]).ToUpper() -eq 'ALL') {
     $discovered = $true
-    $found = Get-DiscoveredEnvs
+    $found = @(Get-DiscoveredEnvs)
     if ($found.Count -eq 0) {
         throw "ENVS=ALL found no 'env' label values in Loki for the reporting window. Check LOKI_PROJECT and the job label."
     }
-    $Envs = Sort-EnvNatural (@($found) | Where-Object { $EnvsExclude -notcontains $_.ToUpper() })
+    $Envs = @(Sort-EnvNatural @($found | Where-Object { $EnvsExclude -notcontains ([string]$_).ToUpper() }))
     Write-Host "Discovered envs  : $($found.Count) found, $($Envs.Count) after exclusions"
     Write-Host "                   $($Envs -join ', ')"
     Write-Host ""
@@ -352,7 +355,7 @@ if ($discovered) {
     if ($keep.Count -eq 0) {
         throw "None of the $($Envs.Count) discovered environments had any logins in this period."
     }
-    $Envs = $keep
+    $Envs = @($keep)
     Write-Host ""
 }
 
@@ -587,7 +590,7 @@ if ($IncludeUsers) {
     $all = @($all | Sort-Object When)
     if ($all.Count -gt $MaxDetailRows) {
         Write-Host "##vso[task.logissue type=warning]Login detail truncated to $MaxDetailRows of $($all.Count) rows (MAX_DETAIL_ROWS)."
-        $all = $all[0..($MaxDetailRows - 1)]
+        $all = @($all[0..($MaxDetailRows - 1)])
     }
     foreach ($row in $all) {
         [void]$detailRows.Add(@($row.When, $row.Env, $row.Centre, $(if ($row.User) { $row.User } else { '(unparsed)' })))
