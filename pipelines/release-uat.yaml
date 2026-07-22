@@ -19,12 +19,14 @@ pr: none
 
 parameters:
 - name: envInstance
-  displayName: 'UAT instance'
+  displayName: 'UAT instance (blank = the unnumbered UAT environment)'
   type: string
   default: '1'
-  # Blank is allowed for estates that have an unnumbered environment; only
-  # use it if a matching <TIER>-<COMP> service connection actually exists.
-  values: ['', '1', '2', '3', '4']
+  # Deliberately NOT a picklist. ADO rejects an empty string in a `values:` list
+  # ("Unexpected value ''"), and some estates have an unnumbered UAT alongside
+  # UAT1..UATn. Free text is the only way to allow blank. Whatever is entered
+  # must have a matching <TIER><INSTANCE>-<COMP> service connection and an
+  # ADO environment, or the deploy fails to resolve.
 
 - name: useConfigProducts
   displayName: 'Deploy everything config lists for this env (untick to pick manually)'
@@ -49,13 +51,14 @@ parameters:
   type: boolean
   default: false
 
-# Teams notification. Off until a TEAMS_WEBHOOK is added to the variable group;
-# the Notify stage still appears in the run, marked skipped.
+# Bypass change detection and deploy even if this commit is already live.
 - name: forceRebuild
   displayName: 'Force rebuild (deploy even if the commit is already live)'
   type: boolean
   default: false
 
+# Teams notification. Off until a webhook is added to the variable group;
+# the Notify stage still appears in the run, marked skipped.
 - name: notifyTeams
   displayName: 'Post a summary to Teams'
   type: boolean

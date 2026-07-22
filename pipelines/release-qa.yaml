@@ -22,7 +22,7 @@ parameters:
   displayName: 'QA instance'
   type: string
   default: '1'
-  values: ['', '1', '2', '3', '4', '5', '7', '8', '9', '10', '12']
+  values: ['1', '2', '3', '4', '5', '7', '8', '9', '10', '12']
 
 - name: useConfigProducts
   displayName: 'Deploy everything config lists for this env (untick to pick manually)'
@@ -47,13 +47,14 @@ parameters:
   type: boolean
   default: false
 
-# Teams notification. Off until a TEAMS_WEBHOOK is added to the variable group;
-# the Notify stage still appears in the run, marked skipped.
+# Bypass change detection and deploy even if this commit is already live.
 - name: forceRebuild
   displayName: 'Force rebuild (deploy even if the commit is already live)'
   type: boolean
   default: false
 
+# Teams notification. Off until a webhook is added to the variable group;
+# the Notify stage still appears in the run, marked skipped.
 - name: notifyTeams
   displayName: 'Post a summary to Teams'
   type: boolean
