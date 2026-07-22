@@ -90,24 +90,35 @@ foreach ($p in $Products) {
     if (-not $ProductMeta.ContainsKey($p)) { throw "Unknown product '$p' in PRODUCTS. Expected any of: pc, bc, cc, cm." }
 }
 
-# ---- date window (UTC) ----
-# TEST_MONTH=YYYY-MM for a specific month, blank for the current one. The window
-# ends at the first of the NEXT month, so a mid-month run reports the month so
-# far rather than failing -- which also means it is a partial figure.
+# ---- reporting window ----
+# Boundaries are in REPORT_TIMEZONE, not UTC: a report labelled July should mean
+# July where the reader lives. The local month start/end are converted to UTC
+# instants for Loki, and daily buckets are labelled with the local date, so the
+# figures line up with a Grafana dashboard viewed in the same zone.
 $testMonth = Get-EnvOr 'TEST_MONTH'
+$nowLocal  = if ($tzInfo) { [TimeZoneInfo]::ConvertTimeFromUtc([datetime]::UtcNow, $tzInfo) } else { [datetime]::UtcNow }
+
 if ($testMonth) {
-    $start = [datetime]::SpecifyKind([datetime]::ParseExact("$testMonth-01", 'yyyy-MM-dd', $null), 'Utc')
+    $monthStart = [datetime]::ParseExact("$testMonth-01", 'yyyy-MM-dd', $null)
     Write-Host "Period source    : TEST_MONTH override"
 } else {
-    $utcNow = [datetime]::UtcNow
-    $start  = [datetime]::SpecifyKind([datetime]::new($utcNow.Year, $utcNow.Month, 1), 'Utc')
+    $monthStart = [datetime]::new($nowLocal.Year, $nowLocal.Month, 1)
     Write-Host "Period source    : current month"
 }
-$end        = $start.AddMonths(1)
-$monthLabel = $start.ToString('MMMM yyyy')
-$genStamp   = [datetime]::UtcNow.ToString('yyyy-MM-dd HH:mm') + ' UTC'
+$monthEnd = $monthStart.AddMonths(1)
 
-Write-Host "Reporting period : $($start.ToString('yyyy-MM-dd')) to $($end.AddDays(-1).ToString('yyyy-MM-dd'))  ($monthLabel)"
+if ($tzInfo) {
+    $start = [TimeZoneInfo]::ConvertTimeToUtc([datetime]::SpecifyKind($monthStart, 'Unspecified'), $tzInfo)
+    $end   = [TimeZoneInfo]::ConvertTimeToUtc([datetime]::SpecifyKind($monthEnd,   'Unspecified'), $tzInfo)
+} else {
+    $start = [datetime]::SpecifyKind($monthStart, 'Utc')
+    $end   = [datetime]::SpecifyKind($monthEnd,   'Utc')
+}
+
+$monthLabel = $monthStart.ToString('MMMM yyyy')
+$genStamp   = $nowLocal.ToString('yyyy-MM-dd HH:mm') + " $tzLabel"
+
+Write-Host "Reporting period : $($monthStart.ToString('yyyy-MM-dd')) to $($monthEnd.AddDays(-1).ToString('yyyy-MM-dd'))  ($monthLabel, $tzLabel)"
 Write-Host "Environments     : $($Envs -join ', ')"
 Write-Host "Centres          : $($Products -join ', ')"
 Write-Host ""
@@ -146,6 +157,12 @@ function Get-UnixNanos { param([datetime]$T)
 
 # Same selector without the aggregation, so the raw lines come back.
 $LogSelectorTemplate = '{{project="{0}", job="{1}", env="{2}", filename=~".*{3}.log"}} |= `User Login`'
+
+function ConvertFrom-UnixSeconds { param([long]$Seconds)
+    $utc = [DateTimeOffset]::FromUnixTimeSeconds($Seconds).UtcDateTime
+    if ($tzInfo) { return [TimeZoneInfo]::ConvertTimeFromUtc($utc, $tzInfo) }
+    return $utc
+}
 
 function ConvertFrom-UnixNanos { param([long]$Nanos)
     $utc = [DateTimeOffset]::FromUnixTimeMilliseconds([long]($Nanos / 1000000)).UtcDateTime
@@ -264,9 +281,9 @@ function Get-DailyCounts {
         $result = $resp.data.result
         if ($result -and $result.Count -gt 0) {
             foreach ($pair in $result[0].values) {
-                $sampleAt = [DateTimeOffset]::FromUnixTimeSeconds([long][double]$pair[0]).UtcDateTime
+                $sampleAt = ConvertFrom-UnixSeconds ([long][double]$pair[0])
                 $day      = $sampleAt.AddDays(-1).Date          # the day the sample covers
-                if ($day -ge $start.Date -and $day -lt $end.Date) {
+                if ($day -ge $monthStart.Date -and $day -lt $monthEnd.Date) {
                     $daily[$day] = [int][double]$pair[1]        # assign, so chunk overlaps cannot double count
                 }
             }
@@ -525,7 +542,7 @@ function New-XlsxFile {
 # ---- workbook ----
 $summaryRows = New-Object System.Collections.ArrayList
 [void]$summaryRows.Add(@($ReportTitle))
-[void]$summaryRows.Add(@("Period: $($start.ToString('yyyy-MM-dd')) to $($end.AddDays(-1).ToString('yyyy-MM-dd'))  ($monthLabel)"))
+[void]$summaryRows.Add(@("Period: $($monthStart.ToString('yyyy-MM-dd')) to $($monthEnd.AddDays(-1).ToString('yyyy-MM-dd'))  ($monthLabel, times in $tzLabel)"))
 [void]$summaryRows.Add(@("Source: Loki $LokiUrl  |  Match: |= ""User Login""  |  Generated: $genStamp"))
 [void]$summaryRows.Add(@(''))
 [void]$summaryRows.Add(@('Environment', 'Centre', 'Total Logins'))
@@ -625,7 +642,7 @@ if ($IncludeUsers) {
     Write-Host "Detail rows      : $($all.Count)"
 }
 
-$fileName = "$FilePrefix-$($start.ToString('yyyy-MM')).xlsx"
+$fileName = "$FilePrefix-$($monthStart.ToString('yyyy-MM')).xlsx"
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $xlsxPath = Join-Path $OutDir $fileName
 
@@ -704,7 +721,7 @@ if ($LeastUsedCount -gt 0 -and $envTotals.Count -gt 1) {
         "<p style=`"margin:6px 0 0;font-size:11px;color:#888;`">Quietest first, across all centres reported.</p>"
 }
 
-$periodText = "$($start.ToString('d MMM yyyy')) &ndash; $($end.AddDays(-1).ToString('d MMM yyyy'))"
+$periodText = "$($monthStart.ToString('d MMM yyyy')) &ndash; $($monthEnd.AddDays(-1).ToString('d MMM yyyy'))"
 $sheetNote  = if ($IncludeUsers) { 'Summary, Daily, Users and Detail sheets' } else { 'Summary and Daily sheets' }
 
 $html = @"

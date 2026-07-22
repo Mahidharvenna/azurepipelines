@@ -227,11 +227,25 @@ Unmatched events are still counted, under the user `(unparsed)`, so nothing is
 silently dropped — a large `(unparsed)` figure means the regex is wrong, not
 that the data is missing.
 
-### Timestamps
+### Timestamps and the reporting window
 
-UTC by default. Set `REPORT_TIMEZONE` to a Windows time-zone id
-(`Eastern Standard Time`, `GMT Standard Time`, …) to convert; the sheets say
-which zone they are in. An unknown id warns and falls back to UTC.
+UTC by default. Set `REPORT_TIMEZONE` to a Windows time-zone id to change that:
+
+```
+REPORT_TIMEZONE = Eastern Standard Time
+```
+
+That id covers the whole Eastern zone and **follows daylight saving on its own** —
+it does not mean "always EST". Windows ids are zone names, not fixed offsets.
+
+Setting it moves the **month boundaries** too, not just the displayed times. A
+report labelled July then means July where the reader lives: the window runs from
+local midnight on the 1st to local midnight on the 1st of the next month, and
+daily buckets carry the local date. Without that the report would show Eastern
+timestamps inside a UTC-shaped month, and the totals would disagree with a
+Grafana dashboard viewed in the same zone.
+
+An unknown id warns and falls back to UTC.
 
 ### Entry cap
 
