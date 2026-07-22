@@ -10,29 +10,24 @@
 # Register as its own pipeline (Pipelines -> New -> Existing YAML file).
 # =============================================================================
 
-# Cron cannot express "last day of the month" -- there is no L in standard cron
-# and ADO does not support it. So this fires on days 28-31 and the run itself
-# stands down unless today is genuinely the last day. Expect up to 3 short no-op
-# runs a month; they finish in seconds and are marked skipped.
+# NO schedules: block here on purpose.
 #
-# 23:55 UTC is deliberately late: the reporting window is UTC calendar months,
-# so running earlier would cut the final hours out of the month's totals.
-schedules:
-- cron: '55 23 28-31 * *'           # 23:55 UTC, days 28-31 (guarded to the last one)
-  displayName: 'GW monthly login report (end of month)'
-  branches:
-    include: [master]
-  always: true                      # send regardless of commits since last run
+# Defining schedules: in YAML makes ADO ignore any UI scheduled trigger for this
+# pipeline. Leaving it out means the schedule is managed in the UI instead
+# (Pipeline -> Edit -> ... -> Triggers -> Scheduled), which is easier to change
+# and needs no commit. The pipeline needs no parameters for a scheduled run --
+# a blank month means "current month" -- so a plain UI schedule is sufficient.
 
 trigger: none
 pr: none
 
 name: 'GW-LoginReport-$(Date:yyyyMMdd).$(Rev:r)'
 
-# Optional manual override for testing a specific month (YYYY-MM); blank = last month.
+# Which month to report. Blank -- the normal case, including every scheduled
+# run -- means the current month. Set it to back-fill or re-issue an older one.
 parameters:
 - name: testMonth
-  displayName: 'Test month override (YYYY-MM, blank = last full month)'
+  displayName: 'Month to report (YYYY-MM). Leave blank for the current month.'
   type: string
   default: ''
 
@@ -47,31 +42,8 @@ steps:
   clean: true
   persistCredentials: false
 
-# Stand down on 28/29/30 when they are not the last day of the month.
-# Manual runs always proceed, so a report can be produced on demand.
-- powershell: |
-    $reason  = '$(Build.Reason)'
-    $today   = [datetime]::UtcNow.Date
-    $lastDay = [datetime]::DaysInMonth($today.Year, $today.Month)
-    $isLast  = ($today.Day -eq $lastDay)
-
-    Write-Host "Today (UTC)      : $($today.ToString('yyyy-MM-dd'))"
-    Write-Host "Last day of month: $lastDay"
-    Write-Host "Trigger          : $reason"
-
-    if ($reason -eq 'Schedule' -and -not $isLast) {
-      Write-Host ""
-      Write-Host "Not the last day of the month -- nothing to do."
-      Write-Host "The schedule fires on days 28-31 because cron cannot target the last day directly."
-      Write-Host "##vso[task.setvariable variable=RUN_REPORT]false"
-    } else {
-      Write-Host "##vso[task.setvariable variable=RUN_REPORT]true"
-    }
-  displayName: 'Check this is the last day of the month'
-
 - task: PowerShell@2
   displayName: 'Generate and email login report'
-  condition: and(succeeded(), eq(variables['RUN_REPORT'], 'true'))
   inputs:
     targetType: filePath
     filePath: 'reports/monthly_report.ps1'
@@ -99,7 +71,7 @@ steps:
 # Keep a copy of the spreadsheet attached to the run for re-download/audit.
 - task: PublishBuildArtifacts@1
   displayName: 'Publish xlsx as build artifact'
-  condition: and(succeededOrFailed(), eq(variables['RUN_REPORT'], 'true'))
+  condition: succeededOrFailed()
   inputs:
     PathtoPublish: '$(Build.ArtifactStagingDirectory)'
     ArtifactName: 'monthly-report'

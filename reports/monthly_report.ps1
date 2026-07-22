@@ -69,33 +69,24 @@ foreach ($p in $Products) {
 # ---------------------------------------------------------------------------
 # DATE WINDOW (UTC)
 #
-#   TEST_MONTH=YYYY-MM  -> exactly that month
-#   run on the last day -> THIS month, i.e. the one ending today
-#   any other day       -> the last FULL month
+#   TEST_MONTH=YYYY-MM  -> exactly that month (back-fill / re-issue)
+#   blank               -> the CURRENT month
 #
-# The second case is what makes an end-of-month schedule report the month that
-# is closing rather than the one before it. It also means a run on the 1st still
-# behaves correctly, so either schedule works without a config change.
+# Blank is the normal case, including every scheduled run. Scheduling is managed
+# in the ADO UI, so running on the last day of the month reports that month.
 #
-# Caveat: a run before 23:59:59 UTC on the last day cannot include the final
-# minutes of that day. Scheduling at 23:55 keeps the gap to ~5 minutes; schedule
-# on the 1st instead if the month must be counted to the second.
+# Note the window always ends at the first of the NEXT month, so a run partway
+# through reports the month so far rather than failing -- useful for a mid-month
+# spot check, but it does mean a run before month-end is a partial figure.
 # ---------------------------------------------------------------------------
 $testMonth = Get-EnvOr 'TEST_MONTH'
 if ($testMonth) {
     $start = [datetime]::SpecifyKind([datetime]::ParseExact("$testMonth-01", 'yyyy-MM-dd', $null), 'Utc')
     Write-Host "Period source    : TEST_MONTH override"
 } else {
-    $utcNow    = [datetime]::UtcNow
-    $firstOfMo = [datetime]::SpecifyKind([datetime]::new($utcNow.Year, $utcNow.Month, 1), 'Utc')
-    $isLastDay = ($utcNow.Day -eq [datetime]::DaysInMonth($utcNow.Year, $utcNow.Month))
-    if ($isLastDay) {
-        $start = $firstOfMo                 # the month closing today
-        Write-Host "Period source    : month ending today (end-of-month run)"
-    } else {
-        $start = $firstOfMo.AddMonths(-1)   # the last complete month
-        Write-Host "Period source    : last full calendar month"
-    }
+    $utcNow = [datetime]::UtcNow
+    $start  = [datetime]::SpecifyKind([datetime]::new($utcNow.Year, $utcNow.Month, 1), 'Utc')
+    Write-Host "Period source    : current month"
 }
 $end        = $start.AddMonths(1)
 $monthLabel = $start.ToString('MMMM yyyy')

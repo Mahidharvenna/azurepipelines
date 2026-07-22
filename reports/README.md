@@ -82,40 +82,30 @@ sum(count_over_time(
 over the report window, stepped daily. Daily values populate the **Daily** sheet;
 their sum is the **Summary** total.
 
-## Schedule: end of month
+## Scheduling
 
-The pipeline runs at **23:55 UTC on the last day of each month** and reports that
-month.
+There is deliberately **no `schedules:` block in the YAML** -- defining one makes
+ADO ignore any UI scheduled trigger for that pipeline. Scheduling is managed in
+the UI instead:
 
-Cron cannot target the last day -- there is no `L` in standard cron and ADO does
-not support it -- so the schedule fires on **days 28-31** and each run stands
-down unless today is genuinely the last day:
+**Pipeline → Edit → ⋯ → Triggers → Scheduled → +Add**
 
-```
-Today (UTC)      : 2026-07-30
-Last day of month: 31
-Not the last day of the month -- nothing to do.
-```
+Set it to run on the last day of the month at whatever time suits. Changing the
+cadence is then a UI change, not a commit.
 
-Expect up to three short no-op runs a month. They finish in seconds and show the
-report step as skipped. Leap years are handled (`DaysInMonth`), so 29 February
-is correctly the last day in a leap year and 28 February otherwise.
+A scheduled run needs no parameters: a blank month means **the current month**,
+so a run on 31 July reports July.
 
-**Manual runs always proceed**, whatever the date, so a report can be produced on
-demand.
+### Which month gets reported
 
-### The trade-off
+| `Month to report` | Result |
+|---|---|
+| blank *(scheduled runs, and normally manual ones)* | the **current** month |
+| `2026-05` | exactly that month -- back-fill or re-issue |
 
-The reporting window is UTC calendar months, so a run at 23:55 on the last day
-**cannot include the final ~5 minutes** of that month. If the month must be
-counted to the second, schedule on the 1st instead:
-
-```yaml
-- cron: '0 6 1 * *'      # 06:00 UTC on the 1st
-```
-
-No other change is needed -- the script reports the *last full month* when it is
-not run on a month-end, so both schedules produce the correct period.
+The window always ends at the first of the *next* month, so a mid-month run
+reports the month so far rather than failing. Useful for a spot check, but a run
+before month-end is by definition a partial figure.
 
 ## Notes / gotchas
 
