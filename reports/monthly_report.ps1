@@ -60,6 +60,11 @@ $EnvsExclude = @(Split-List (Get-EnvOr 'ENVS_EXCLUDE') | ForEach-Object { $_.ToU
 $Products = @(Split-List (Get-EnvOr 'PRODUCTS' 'pc') | ForEach-Object { $_.ToLower() })
 $OutDir   = Get-EnvOr 'OUTPUT_DIR' '.'
 
+# Branding. Set REPORT_TITLE to whatever the audience should see -- it heads the
+# email, the subject line and the workbook's Summary sheet.
+$ReportTitle  = Get-EnvOr 'REPORT_TITLE' 'Guidewire Login Report'
+$FilePrefix   = Get-EnvOr 'REPORT_FILE_PREFIX' 'gw-logins'
+
 # Per-user detail. The username has to be pulled out of the log line, and that
 # format is site-specific -- set LOGIN_USER_REGEX with a named group 'user'.
 # The default covers "User Login: jdoe" / "User Login jdoe" / "User Login=jdoe".
@@ -526,7 +531,7 @@ function New-XlsxFile {
 # BUILD THE WORKBOOK
 # ---------------------------------------------------------------------------
 $summaryRows = New-Object System.Collections.ArrayList
-[void]$summaryRows.Add(@('Guidewire Login Report'))
+[void]$summaryRows.Add(@($ReportTitle))
 [void]$summaryRows.Add(@("Period: $($start.ToString('yyyy-MM-dd')) to $($end.AddDays(-1).ToString('yyyy-MM-dd'))  ($monthLabel)"))
 [void]$summaryRows.Add(@("Source: Loki $LokiUrl  |  Match: |= ""User Login""  |  Generated: $genStamp"))
 [void]$summaryRows.Add(@(''))
@@ -627,7 +632,7 @@ if ($IncludeUsers) {
     Write-Host "Detail rows      : $($all.Count)"
 }
 
-$fileName = "gw-logins-$($start.ToString('yyyy-MM')).xlsx"
+$fileName = "$FilePrefix-$($start.ToString('yyyy-MM')).xlsx"
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
 $xlsxPath = Join-Path $OutDir $fileName
 
@@ -710,7 +715,7 @@ $html = @"
 <html><body style="margin:0;padding:0;background:#ffffff;">
 <div style="font-family:Segoe UI,Helvetica,Arial,sans-serif;max-width:720px;padding:4px 2px;">
 
-  <h2 style="margin:0 0 2px;font-size:19px;color:#1f3864;">Guidewire Login Report</h2>
+  <h2 style="margin:0 0 2px;font-size:19px;color:#1f3864;">$ReportTitle</h2>
   <p style="margin:0 0 18px;font-size:13px;color:#666;">
     $monthLabel &nbsp;&middot;&nbsp; $periodText &nbsp;&middot;&nbsp; times in $tzLabel
   </p>
@@ -751,7 +756,7 @@ $html = @"
 $msg = New-Object System.Net.Mail.MailMessage
 $msg.From = New-Object System.Net.Mail.MailAddress($FromAddr)
 foreach ($t in $ToAddrs) { $msg.To.Add($t) }
-$msg.Subject    = "Guidewire Login Report - $monthLabel"
+$msg.Subject    = "$ReportTitle - $monthLabel"
 $msg.IsBodyHtml = $true
 $msg.Body       = $html
 $attachment     = New-Object System.Net.Mail.Attachment($xlsxPath)

@@ -48,6 +48,8 @@ Pipelines → Library → **+ Variable group** → name it **`gw-reports-secrets
 | `TO_ADDRS` | `you@example.com,team@example.com` (comma-sep) | no |
 | `ENVS` | `DEV1,QA1,UAT1,PROD1` (match your Loki `env` label casing) | no |
 | `PRODUCTS` | `pc` (or `pc,bc,cc,cm`) | no |
+| `REPORT_TITLE` | *(optional)* e.g. `MyOrg Guidewire Login Report` — heads the email, subject and workbook | no |
+| `REPORT_FILE_PREFIX` | *(optional, default `gw-logins`)* attachment filename prefix | no |
 | `LOKI_MAX_QUERY_DAYS` | *(optional, default `7`)* — see below | no |
 | `INCLUDE_USER_DETAIL` | *(optional, default `true`)* — per-user sheets | no |
 | `LOGIN_USER_REGEX` | *(optional)* — must capture a named group `user`; see below | no |
@@ -111,6 +113,20 @@ so a run on 31 July reports July.
 The window always ends at the first of the *next* month, so a mid-month run
 reports the month so far rather than failing. Useful for a spot check, but a run
 before month-end is by definition a partial figure.
+
+## Branding
+
+`REPORT_TITLE` sets the name shown to recipients — it heads the email body, the
+subject line and the workbook's Summary sheet:
+
+```
+REPORT_TITLE       = MyOrg Guidewire Login Report
+REPORT_FILE_PREFIX = myorg-gw-logins
+```
+
+giving the subject *"MyOrg Guidewire Login Report - July 2026"* and an attachment
+named `myorg-gw-logins-2026-07.xlsx`. Both default to a generic name, so nothing
+site-specific is baked into the script.
 
 ## Multiple environments
 
