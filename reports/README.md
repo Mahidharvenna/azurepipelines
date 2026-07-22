@@ -11,8 +11,7 @@ same `|= "User Login"` line match — so the report reconciles with the dashboar
 | File | Purpose |
 |---|---|
 | `gw-monthly-login-report.yaml` | The scheduled pipeline (cron: 1st of month, 06:00 UTC) |
-| `monthly_report.ps1` | **Used by the pipeline.** Queries Loki, builds the xlsx, emails it |
-| `monthly_report.py` | Equivalent in Python, if you would rather use that |
+| `monthly_report.ps1` | Queries Loki, builds the xlsx, emails it |
 
 ### Why PowerShell
 
@@ -26,8 +25,8 @@ a trap on self-hosted agents -- it only searches the agent tool cache
 (`_work/_tool`), not a normal machine install, so it fails with *"did not match
 any version in Agent.ToolsDirectory"* even when Python is present.
 
-The Python version is kept for sites that already have Python plus `requests`
-and `openpyxl`. To use it, swap the pipeline's script step back.
+There is deliberately only one implementation, so there is never a question of
+which script the pipeline actually runs.
 
 ## One-time setup
 
@@ -121,7 +120,7 @@ before month-end is by definition a partial figure.
 
 ## Label mapping
 
-`monthly_report.py` maps products to Loki labels — adjust `PRODUCT_META` to your
+`monthly_report.ps1` maps products to Loki labels — adjust `$ProductMeta` to your
 own scheme and confirm the `job` names via the Grafana Label browser:
 
 | Product | `job` | filename frag |
