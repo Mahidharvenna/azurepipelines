@@ -11,22 +11,19 @@ same `|= "User Login"` line match — so the report reconciles with the dashboar
 | File | Purpose |
 |---|---|
 | `gw-monthly-login-report.yaml` | The scheduled pipeline (cron: 1st of month, 06:00 UTC) |
-| `monthly_report.ps1` | Queries Loki, builds the xlsx, emails it |
+| `monthly_report.py` | Queries Loki, builds the xlsx, emails it |
 
-### Why PowerShell
+### Python, standard library only
 
-The pipeline runs the **PowerShell** version because it needs nothing installed
-on the agent: no Python runtime, no `pip` packages, no PowerShell Gallery access
-and no Excel. The `.xlsx` is written directly as OOXML (a zip of XML parts) via
-`System.IO.Compression`, which ships with .NET.
+The report is **Python using only the standard library** -- no `pip install`,
+no third-party packages. `urllib` does the HTTP, `zipfile` writes the `.xlsx`
+directly as OOXML, `smtplib` sends the mail. So the only requirement is a
+Python 3 interpreter on the agent.
 
-That matters on a locked-down build agent. `UsePythonVersion@0` in particular is
-a trap on self-hosted agents -- it only searches the agent tool cache
-(`_work/_tool`), not a normal machine install, so it fails with *"did not match
-any version in Agent.ToolsDirectory"* even when Python is present.
-
-There is deliberately only one implementation, so there is never a question of
-which script the pipeline actually runs.
+`UsePythonVersion@0` is deliberately **not** used -- it only searches the agent
+tool cache (`_work/_tool`), not a normal install, so it fails on a self-hosted
+agent even when Python is present. The pipeline locates the interpreter itself
+(`python`, `python3`, then `py`).
 
 ## One-time setup
 
@@ -212,8 +209,8 @@ logs are columnar and the username is simply the *n*th column rather than
 something that follows a keyword:
 
 ```
-    node1  jbankay  3de-f511  2026-07-01 00:14:00,552  https-jsse-...  INFO  ...
-      fields: [1] node1   [2] jbankay   [3] 3de-f511   [4] 2026-07-01   [5] 00:14:00,552
+    node1  asmith  3de-f511  2026-07-01 00:14:00,552  https-jsse-...  INFO  ...
+      fields: [1] node1   [2] asmith   [3] 3de-f511   [4] 2026-07-01   [5] 00:14:00,552
     If the username is field N, set:  LOGIN_USER_REGEX = ^(\S+\s+){N-1}(?<user>\S+)
 ```
 
@@ -340,8 +337,9 @@ Worth knowing if you ever reconcile against Grafana: the dashboard uses
 - **Counts login *events*, not unique users.** A user logging in 5× counts as 5.
   For unique users you'd extract the username from the log line via `| regexp`.
 - **Agent network**: the build agent must reach both Loki and the SMTP relay.
-- **Nothing to install on the agent.** The PowerShell version needs only
-  Windows PowerShell 5.1, which is present by default.
+- **Python 3 on the agent** -- that is the only requirement; the script imports
+  only the standard library. If the pipeline reports none found, install Python
+  3, tick *Add to PATH*, and restart the agent service.
 - **Loki retention**: querying "last month" on the 1st needs ≥ ~32 days retention.
   Bump `retention_period` to `1080h` (45d) for safety.
 - **TLS**: if Loki is internal HTTPS and the agent doesn't trust the cert, set
@@ -349,7 +347,7 @@ Worth knowing if you ever reconcile against Grafana: the dashboard uses
 
 ## Label mapping
 
-`monthly_report.ps1` maps products to Loki labels — adjust `$ProductMeta` to your
+`monthly_report.py` maps products to Loki labels — adjust `PRODUCT_META` to your
 own scheme and confirm the `job` names via the Grafana Label browser:
 
 | Product | `job` | filename frag |

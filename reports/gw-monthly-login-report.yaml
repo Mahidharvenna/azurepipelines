@@ -1,67 +1,85 @@
 # Monthly Guidewire login report: Loki -> Excel -> email.
-# PowerShell, so the agent needs no Python, pip or PSGallery access.
+# Python, standard library only -- no pip install.
 
-# NO schedules: block here on purpose.
-#
-# Defining schedules: in YAML makes ADO ignore any UI scheduled trigger for this
-# pipeline. Leaving it out means the schedule is managed in the UI instead
-# (Pipeline -> Edit -> ... -> Triggers -> Scheduled), which is easier to change
-# and needs no commit. The pipeline needs no parameters for a scheduled run --
-# a blank month means "current month" -- so a plain UI schedule is sufficient.
-
+# No schedules: block here on purpose -- defining one makes ADO ignore UI
+# scheduled triggers. Manage the schedule in the UI (Edit -> ... -> Triggers).
 trigger: none
 pr: none
 
 name: 'GW-LoginReport-$(Date:yyyyMMdd).$(Rev:r)'
 
-# Blank (the normal case) means the current month. Set it to back-fill.
 parameters:
 - name: testMonth
   displayName: 'Month to report (YYYY-MM). Leave blank for the current month.'
   type: string
   default: ''
 
-# ADO Server 2022 RTW does not allow a template expression on pool.name, so the
-# pool is a literal. Change it here to pin the report to a consistent agent pool
-# (proxy / TLS / SMTP reachability varies per agent).
+# ADO Server 2022 RTW rejects a template expression on pool.name, so this is a
+# literal. Change it to pin the report to a consistent agent pool (proxy / TLS /
+# SMTP reachability varies per agent).
 pool:
   name: Default
 
 variables:
-- group: 'gw-reports-secrets'       # create this Variable Group in Library (see README)
+- group: 'gw-reports-secrets'
 
 steps:
 - checkout: self
   clean: true
-  persistCredentials: false
 
-- task: PowerShell@2
+# UsePythonVersion@0 only searches the agent tool cache, not a normal install,
+# so it fails on self-hosted agents even when Python is present. Locate the
+# interpreter directly instead. The script needs only the standard library.
+- powershell: |
+    $exe = $null
+    foreach ($c in 'python', 'python3', 'py') {
+      $cmd = Get-Command $c -ErrorAction SilentlyContinue
+      if (-not $cmd) { continue }
+      $ver = (& $c --version 2>&1) -join ' '
+      if ($LASTEXITCODE -eq 0 -and $ver -match 'Python 3') {
+        $exe = $cmd.Source; Write-Host "Using $ver  ($exe)"; break
+      }
+    }
+    if (-not $exe) {
+      Write-Error "No Python 3 found on this agent. Install Python 3, tick 'Add to PATH', and restart the agent service."
+      exit 1
+    }
+    Write-Host "##vso[task.setvariable variable=PYTHON_EXE]$exe"
+  displayName: 'Locate Python 3'
+
+- script: '"$(PYTHON_EXE)" reports/monthly_report.py'
   displayName: 'Generate and email login report'
-  inputs:
-    targetType: filePath
-    filePath: 'reports/monthly_report.ps1'
-    errorActionPreference: stop
-    failOnStderr: false
+  workingDirectory: '$(Build.SourcesDirectory)'
   env:
     # --- Loki ---
     LOKI_URL:        $(LOKI_URL)
-    LOKI_VERIFY_TLS: $(LOKI_VERIFY_TLS)     # 'false' if the agent doesn't trust the cert
-    LOKI_PROJECT:    $(LOKI_PROJECT)        # value of your Loki `project` label
+    LOKI_PROJECT:    $(LOKI_PROJECT)
+    LOKI_VERIFY_TLS: $(LOKI_VERIFY_TLS)
+    BYPASS_PROXY:    $(BYPASS_PROXY)
     # --- SMTP ---
     SMTP_HOST: $(SMTP_HOST)
     SMTP_PORT: $(SMTP_PORT)
     SMTP_TLS:  $(SMTP_TLS)
     SMTP_USER: $(SMTP_USER)
     SMTP_PASS: $(SMTP_PASS)
-    # --- Report ---
-    FROM_ADDR: $(FROM_ADDR)
-    TO_ADDRS:  $(TO_ADDRS)
-    ENVS:      $(ENVS)                       # e.g. DEV1,QA7  (match Loki env label casing)
-    PRODUCTS:  $(PRODUCTS)                   # e.g. pc   (or pc,bc,cc,cm)
-    OUTPUT_DIR: '$(Build.ArtifactStagingDirectory)'
-    TEST_MONTH: ${{ parameters.testMonth }}
+    # --- report ---
+    FROM_ADDR:           $(FROM_ADDR)
+    TO_ADDRS:            $(TO_ADDRS)
+    ENVS:                $(ENVS)
+    ENVS_EXCLUDE:        $(ENVS_EXCLUDE)
+    PRODUCTS:            $(PRODUCTS)
+    PRODUCT_JOBS:        $(PRODUCT_JOBS)
+    PRODUCT_FRAGS:       $(PRODUCT_FRAGS)
+    LOGIN_USER_REGEX:    $(LOGIN_USER_REGEX)
+    REPORT_TIMEZONE:     $(REPORT_TIMEZONE)
+    REPORT_TZ_LABEL:     $(REPORT_TZ_LABEL)
+    REPORT_TITLE:        $(REPORT_TITLE)
+    REPORT_FILE_PREFIX:  $(REPORT_FILE_PREFIX)
+    LEAST_USED_COUNT:    $(LEAST_USED_COUNT)
+    INCLUDE_USER_DETAIL: $(INCLUDE_USER_DETAIL)
+    OUTPUT_DIR:          '$(Build.ArtifactStagingDirectory)'
+    TEST_MONTH:          ${{ parameters.testMonth }}
 
-# Keep a copy on the run for re-download.
 - task: PublishBuildArtifacts@1
   displayName: 'Publish xlsx as build artifact'
   condition: succeededOrFailed()
