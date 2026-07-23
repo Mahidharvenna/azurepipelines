@@ -19,8 +19,8 @@ parameters:
 - name: agentPool
   displayName: 'Agent pool'
   type: string
-  default: 'Default'      # e.g. DevopsAutomation -- pin to a consistent pool so
-                          # proxy / TLS / SMTP behaviour does not vary per run
+  default: 'Default'      # pin to a consistent pool (proxy / TLS / SMTP behaviour
+                          # varies per agent, so a fixed pool removes the variance)
 
 - name: testMonth
   displayName: 'Month to report (YYYY-MM). Leave blank for the current month.'

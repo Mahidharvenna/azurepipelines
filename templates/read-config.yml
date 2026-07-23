@@ -189,6 +189,22 @@ stages:
             }
 
             $run = if ($useConfig) { $true } else { $checkbox[$comp] }
+
+            # Resolve the branch head; skip if that commit is already live here.
+            $sha = $null
+            if ($run -and $skipUnchanged -and -not $force) {
+              $sha = Get-BranchSha $comp.ToUpper() $branch
+              if ($sha) {
+                $short = $sha.Substring(0, 8)
+                if (Test-AlreadyDeployed "$envLabel-$comp-$short") {
+                  $run = $false
+                  $note += "  [unchanged since last deployment: $short]"
+                  $skipped += $comp.ToUpper()
+                }
+              }
+            }
+            Write-Host "##vso[task.setvariable variable=sha_$comp;isOutput=true]$sha"
+
             if ($run) { $anyRun = $true }
 
             Write-Host ("{0,-3} : {1} -> run={2}{3}" -f $comp.ToUpper(), $branch, $run, $note)
