@@ -277,6 +277,30 @@ and consider pinning the pipeline to one known-good agent with a demand.
 
 Set `BYPASS_PROXY=false` only if your Loki genuinely sits behind a proxy.
 
+## Only PC has data? Check the label mapping
+
+Only `pclogs` is confirmed from a real dashboard; the BC/CC/CM job names and the
+CM filename fragment are guesses. If the other centres come back empty, the run's
+**Loki label check** shows why:
+
+```
+Loki label check (project='...'):
+  PC: job='pclogs' OK -- 40 series, 12 env(s). Filenames: /var/app/logs/env/pc/gw/pc.log
+  BC: job='bclogs' returned NO series.        <- job name wrong
+  CM: job='cmlogs' OK -- ...  None of those filenames end in 'cm.log'   <- fragment wrong
+```
+
+Find the real names in Grafana → Explore → Label browser → `job`, then override
+from the variable group — no code change:
+
+```
+PRODUCT_JOBS  = bc=bcgwlogs,cc=ccgwlogs,cm=abgwlogs
+PRODUCT_FRAGS = cm=ab
+```
+
+`PRODUCT_FRAGS` is the filename fragment (`.*<frag>.log`). ContactManager often
+logs as `ab` rather than `cm`, since it deploys under the legacy `ab` name.
+
 ## Loki query length limit
 
 Loki caps how long a single `query_range` may span (`max_query_length`, commonly

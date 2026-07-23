@@ -79,13 +79,28 @@ foreach ($req in @{ SMTP_HOST = $SmtpHost; FROM_ADDR = $FromAddr }.GetEnumerator
 }
 if ($ToAddrs.Count -eq 0) { throw "TO_ADDRS is not set. Add it to the variable group." }
 
-# Confirm job names in Grafana -> Explore -> Label browser before using BC/CC/CM.
+# pclogs is confirmed; BC/CC/CM are guesses. The Loki label check below prints
+# what actually exists. Override without editing this file via the variable
+# group: PRODUCT_JOBS / PRODUCT_FRAGS as comma lists of comp=value, e.g.
+#   PRODUCT_JOBS  = bc=bcgwlogs,cc=ccgwlogs,cm=abgwlogs
+#   PRODUCT_FRAGS = cm=ab
 $ProductMeta = @{
     pc = @{ job = 'pclogs'; frag = 'pc'; label = 'PolicyCenter'   }
     bc = @{ job = 'bclogs'; frag = 'bc'; label = 'BillingCenter'  }
     cc = @{ job = 'cclogs'; frag = 'cc'; label = 'ClaimCenter'    }
     cm = @{ job = 'cmlogs'; frag = 'cm'; label = 'ContactManager' }
 }
+function Apply-Overrides { param([string]$Raw, [string]$Key)
+    foreach ($pair in (Split-List $Raw)) {
+        $kv = $pair -split '=', 2
+        if ($kv.Count -eq 2) {
+            $c = $kv[0].Trim().ToLower()
+            if ($ProductMeta.ContainsKey($c)) { $ProductMeta[$c][$Key] = $kv[1].Trim() }
+        }
+    }
+}
+Apply-Overrides (Get-EnvOr 'PRODUCT_JOBS')  'job'
+Apply-Overrides (Get-EnvOr 'PRODUCT_FRAGS') 'frag'
 foreach ($p in $Products) {
     if (-not $ProductMeta.ContainsKey($p)) { throw "Unknown product '$p' in PRODUCTS. Expected any of: pc, bc, cc, cm." }
 }
@@ -126,8 +141,7 @@ Write-Host ""
 # ---- loki ----
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 if ($BypassProxy) {
-    # Windows PowerShell 5.1 has no -NoProxy on Invoke-RestMethod; clearing the
-    # default proxy is the equivalent and also covers later .NET web calls.
+    # PS 5.1 has no -NoProxy; clearing DefaultWebProxy is the equivalent.
     [System.Net.WebRequest]::DefaultWebProxy = $null
     Write-Host "Proxy            : bypassed (BYPASS_PROXY=true)"
 } else {
@@ -146,6 +160,39 @@ public class TrustAllCertsPolicy : ICertificatePolicy {
     }
     [Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
 }
+
+# For each centre, show what Loki actually has under {project, job}. An empty
+# result means the job name is wrong; the filenames reveal the real fragment.
+function Get-Series {
+    param([string]$Job)
+    $uri  = "$LokiUrl/loki/api/v1/series"
+    $body = @{
+        start   = (Get-UnixNanos $start).ToString()
+        end     = (Get-UnixNanos $start.AddDays([Math]::Min($ChunkDays, 1)).AddHours(1)).ToString()
+        'match[]' = ('{{project="{0}", job="{1}"}}' -f $LokiProject, $Job)
+    }
+    try { return @((Invoke-RestMethod -Uri $uri -Method Get -Body $body -TimeoutSec 60).data) }
+    catch { Write-Host "  (series probe failed for job='$Job': $_)"; return @() }
+}
+
+Write-Host "Loki label check (project='$LokiProject'):"
+foreach ($p in $Products) {
+    $meta   = $ProductMeta[$p]
+    $series = Get-Series $meta.job
+    if ($series.Count -eq 0) {
+        Write-Host "##vso[task.logissue type=warning]  $($p.ToUpper()): job='$($meta.job)' returned NO series. That job label probably does not exist -- check Grafana -> Label browser -> job, then set the right name in `$ProductMeta."
+    } else {
+        $files = @($series | ForEach-Object { $_.filename } | Where-Object { $_ } | Select-Object -Unique)
+        $envs  = @($series | ForEach-Object { $_.env } | Where-Object { $_ } | Select-Object -Unique)
+        $match = @($files | Where-Object { $_ -like "*$($meta.frag).log" })
+        Write-Host ("  {0}: job='{1}' OK -- {2} series, {3} env(s). Filenames: {4}" -f $p.ToUpper(), $meta.job, $series.Count, $envs.Count, (($files | Select-Object -First 3) -join ', '))
+        if ($match.Count -eq 0) {
+            Write-Host "##vso[task.logissue type=warning]    None of those filenames end in '$($meta.frag).log' -- the filename fragment for $($p.ToUpper()) is wrong. Set frag in `$ProductMeta to match (e.g. CM logs are often 'ab')."
+        }
+    }
+}
+Write-Host ""
+# ---- loki (queries) ----
 
 # Single-quoted so the backticks around `User Login` stay literal; {{ }} escape
 # the LogQL braces for the -f operator.
