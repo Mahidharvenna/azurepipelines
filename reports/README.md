@@ -247,6 +247,10 @@ Grafana dashboard viewed in the same zone.
 
 An unknown id warns and falls back to UTC.
 
+The displayed label defaults to the id, so set `REPORT_TZ_LABEL = ET` (or
+`Eastern`) if you would rather the report not say "Standard Time" during the
+daylight-saving months. It only changes the wording, not the conversion.
+
 ### Entry cap
 
 Loki limits entries per query (`LOKI_LOG_LIMIT`, default 5000). Chunking usually

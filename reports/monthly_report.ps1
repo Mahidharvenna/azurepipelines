@@ -72,7 +72,9 @@ if ($ReportTz) {
     try   { $tzInfo = [TimeZoneInfo]::FindSystemTimeZoneById($ReportTz) }
     catch { Write-Host "##vso[task.logissue type=warning]Unknown REPORT_TIMEZONE '$ReportTz' -- timestamps stay in UTC." }
 }
-$tzLabel = if ($tzInfo) { $ReportTz } else { 'UTC' }
+# Displayed label. Defaults to the zone id, so in summer it still reads
+# "...Standard Time" even under DST -- set REPORT_TZ_LABEL (e.g. 'ET') to override.
+$tzLabel = if ($tzInfo) { Get-EnvOr 'REPORT_TZ_LABEL' $ReportTz } else { Get-EnvOr 'REPORT_TZ_LABEL' 'UTC' }
 
 foreach ($req in @{ SMTP_HOST = $SmtpHost; FROM_ADDR = $FromAddr }.GetEnumerator()) {
     if ([string]::IsNullOrWhiteSpace($req.Value)) { throw "$($req.Key) is not set. Add it to the variable group." }
