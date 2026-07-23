@@ -16,19 +16,16 @@ name: 'GW-LoginReport-$(Date:yyyyMMdd).$(Rev:r)'
 
 # Blank (the normal case) means the current month. Set it to back-fill.
 parameters:
-- name: agentPool
-  displayName: 'Agent pool'
-  type: string
-  default: 'Default'      # pin to a consistent pool (proxy / TLS / SMTP behaviour
-                          # varies per agent, so a fixed pool removes the variance)
-
 - name: testMonth
   displayName: 'Month to report (YYYY-MM). Leave blank for the current month.'
   type: string
   default: ''
 
+# ADO Server 2022 RTW does not allow a template expression on pool.name, so the
+# pool is a literal. Change it here to pin the report to a consistent agent pool
+# (proxy / TLS / SMTP reachability varies per agent).
 pool:
-  name: ${{ parameters.agentPool }}
+  name: Default
 
 variables:
 - group: 'gw-reports-secrets'       # create this Variable Group in Library (see README)
