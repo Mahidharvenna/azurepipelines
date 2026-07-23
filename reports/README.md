@@ -290,16 +290,20 @@ Loki label check (project='...'):
   CM: job='cmlogs' OK -- ...  None of those filenames end in 'cm.log'   <- fragment wrong
 ```
 
-Find the real names in Grafana → Explore → Label browser → `job`, then override
-from the variable group — no code change:
+The run also lists every `job` label, so an unknown one is easy to spot:
 
 ```
-PRODUCT_JOBS  = bc=bcgwlogs,cc=ccgwlogs,cm=abgwlogs
-PRODUCT_FRAGS = cm=ab
+All job labels in Loki: bclogs, cclogs, pclogs, ...
 ```
 
-`PRODUCT_FRAGS` is the filename fragment (`.*<frag>.log`). ContactManager often
-logs as `ab` rather than `cm`, since it deploys under the legacy `ab` name.
+Override the mapping from the variable group — no code change. The job label and
+the filename fragment (`.*<frag>.log`) are set separately, because they do not
+always share a stem:
+
+```
+PRODUCT_JOBS  = bc=bclogs,cc=cclogs          # only if the job name differs
+PRODUCT_FRAGS = bc=bclog,cc=cclog            # bc's file is bclog.log, not bc.log
+```
 
 ## Loki query length limit
 

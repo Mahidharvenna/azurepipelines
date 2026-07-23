@@ -16,13 +16,19 @@ name: 'GW-LoginReport-$(Date:yyyyMMdd).$(Rev:r)'
 
 # Blank (the normal case) means the current month. Set it to back-fill.
 parameters:
+- name: agentPool
+  displayName: 'Agent pool'
+  type: string
+  default: 'Default'      # e.g. DevopsAutomation -- pin to a consistent pool so
+                          # proxy / TLS / SMTP behaviour does not vary per run
+
 - name: testMonth
   displayName: 'Month to report (YYYY-MM). Leave blank for the current month.'
   type: string
   default: ''
 
 pool:
-  name: Default                     # your self-hosted pool
+  name: ${{ parameters.agentPool }}
 
 variables:
 - group: 'gw-reports-secrets'       # create this Variable Group in Library (see README)
