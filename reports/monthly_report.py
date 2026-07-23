@@ -244,13 +244,14 @@ def selector(job, env_label, frag):
 
 # ---- label diagnostics: show what actually exists ----
 def label_values(label):
-    try:
-        r = loki_get("/loki/api/v1/label/%s/values" % label,
-                     {"start": str(_unix_ns(start_utc)), "end": str(_unix_ns(end_utc))}, timeout=60)
-        return sorted(r.get("data") or [])
-    except Exception as ex:
-        print("  (could not list %s labels: %s)" % (label, ex))
-        return []
+    # Some Loki builds reject start/end here; fall back to a bare call.
+    for params in ({"start": str(_unix_ns(start_utc)), "end": str(_unix_ns(end_utc))}, {}):
+        try:
+            r = loki_get("/loki/api/v1/label/%s/values" % label, params, timeout=60)
+            return sorted(r.get("data") or [])
+        except Exception:
+            continue
+    return []
 
 
 def series_for(job):
@@ -266,7 +267,9 @@ def series_for(job):
         return []
 
 
-print("All job labels in Loki: %s" % ", ".join(label_values("job")))
+_jobs = label_values("job")
+if _jobs:
+    print("All job labels in Loki: %s" % ", ".join(_jobs))
 print("Loki label check (project='%s'):" % LOKI_PROJECT)
 for p in PRODUCTS:
     meta = PRODUCT_META[p]
@@ -405,9 +408,21 @@ if len(ENVS) == 1 and ENVS[0].upper() == "ALL":
 data = {}  # (env, product) -> {"daily": {...}, "total": int, "events": [...]}
 for e in ENVS:
     for p in PRODUCTS:
-        daily = fetch_daily(e, p)
-        total = sum(daily.values())
-        events = fetch_events(e, p) if INCLUDE_USERS else []
+        if INCLUDE_USERS:
+            # Counts come from the SAME events as the user detail, so "logins"
+            # and "distinct users" can never disagree (a separate count query
+            # offsets its window and can differ by one at month boundaries).
+            raw = fetch_events(e, p)
+            events = [(w, u) for (w, u) in raw
+                      if month_start.date() <= w.date() < month_end.date()]
+            daily = {}
+            for when, _u in events:
+                daily[when.date()] = daily.get(when.date(), 0) + 1
+            total = len(events)
+        else:
+            daily = fetch_daily(e, p)
+            total = sum(daily.values())
+            events = []
         data[(e, p)] = {"daily": daily, "total": total, "events": events}
         distinct = len({u for _, u in events if u})
         if INCLUDE_USERS:
