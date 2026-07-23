@@ -301,8 +301,9 @@ the filename fragment (`.*<frag>.log`) are set separately, because they do not
 always share a stem:
 
 ```
-PRODUCT_JOBS  = bc=bclogs,cc=cclogs          # only if the job name differs
-PRODUCT_FRAGS = bc=bclog,cc=cclog            # bc's file is bclog.log, not bc.log
+PRODUCT_JOBS  = bc=<realjob>,cc=<realjob>    # only if the job name differs
+PRODUCT_FRAGS = bc=<realfrag>,cc=<realfrag>  # e.g. if a centre's file is
+                                             # <x>log.log the fragment is <x>log
 ```
 
 ## Loki query length limit
