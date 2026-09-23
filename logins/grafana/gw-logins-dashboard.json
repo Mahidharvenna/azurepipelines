@@ -1,0 +1,770 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "name": "Annotations & Alerts",
+        "type": "dashboard",
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)"
+      }
+    ]
+  },
+  "description": "Guidewire login history, backed by SQL Server so it is not capped by Loki's ~30-day retention. Fed daily by the GW-Login-Collector pipeline. Shares its Loki selector, username regex and timezone with the monthly emailed report, so the numbers reconcile.",
+  "editable": true,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total logins",
+      "description": "Login events in the selected range. One user logging in 5x counts 5.",
+      "datasource": {
+        "type": "mssql",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "mssql",
+            "uid": "${ds}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT ISNULL(SUM(logins), 0) AS \"Total logins\"\nFROM dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Distinct users",
+      "description": "TRUE distinct users across the whole range -- counted from stored usernames, not by summing daily figures (which would count anyone active on several days more than once). This is the number a monthly report cannot derive from daily counts alone.",
+      "datasource": {
+        "type": "mssql",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 5,
+        "y": 0,
+        "w": 5,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "mssql",
+            "uid": "${ds}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(DISTINCT username) AS \"Distinct users\"\nFROM dbo.gw_login_user_daily\nWHERE $__timeFilter(day_ts)\n    AND username <> '(unparsed)'\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Collector lag",
+      "description": "Days between today and the most recent day with data, worst series. 1 is normal. 3+ means investigate NOW: once a gap passes Loki's ~30-day retention it is unrecoverable. Ignores the dashboard time range on purpose.",
+      "datasource": {
+        "type": "mssql",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "mssql",
+            "uid": "${ds}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT ISNULL(MAX(days_behind), 9999) AS \"Days behind\"\nFROM dbo.gw_login_freshness\nWHERE env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "#EAB839",
+                "value": 2
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "9999": {
+                  "text": "NO DATA",
+                  "index": 0
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "bargauge",
+      "title": "Logins by environment",
+      "datasource": {
+        "type": "mssql",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 0,
+        "w": 10,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "mssql",
+            "uid": "${ds}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT env, SUM(logins) AS logins\nFROM dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY env\nORDER BY SUM(logins) DESC;"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        },
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "minVizHeight": 10,
+        "minVizWidth": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "continuous-BlPu"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Daily logins by environment",
+      "description": "From SQL Server, not Loki -- so this reaches back as far as the collector has run, not 30 days.",
+      "datasource": {
+        "type": "mssql",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "mssql",
+            "uid": "${ds}"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT day_ts AS time, env AS metric, SUM(logins) AS value\nFROM dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY day_ts, env\nORDER BY 1;"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "sum",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false,
+            "gradientMode": "opacity",
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisLabel": "Logins",
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Daily distinct users by environment",
+      "description": "Unique users PER DAY. These cannot be added up across days -- for a true range-wide figure see the 'Distinct users' stat, which counts usernames.",
+      "datasource": {
+        "type": "mssql",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "mssql",
+            "uid": "${ds}"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT day_ts AS time, env AS metric, SUM(distinct_users) AS value\nFROM dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY day_ts, env\nORDER BY 1;"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "sum",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "spanNulls": false,
+            "gradientMode": "opacity",
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisLabel": "Users",
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Monthly logins by environment",
+      "description": "What the emailed spreadsheet delivers. Edge months in the selected range are partial.",
+      "datasource": {
+        "type": "mssql",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "mssql",
+            "uid": "${ds}"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT\n    CAST(DATEFROMPARTS(YEAR([day]), MONTH([day]), 1) AS DATETIME2(0)) AS time,\n    env AS metric,\n    SUM(logins) AS value\nFROM dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY DATEFROMPARTS(YEAR([day]), MONTH([day]), 1), env\nORDER BY 1;"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "fillOpacity": 85,
+            "showPoints": "never",
+            "pointSize": 5,
+            "spanNulls": false,
+            "gradientMode": "none",
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisLabel": "Logins",
+            "axisPlacement": "auto",
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Breakdown",
+      "description": "",
+      "datasource": {
+        "type": "mssql",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "mssql",
+            "uid": "${ds}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n    d.env                                            AS [Environment],\n    d.product                                        AS [Product],\n    SUM(d.logins)                                    AS [Logins],\n    COUNT(*)                                         AS [Days with data],\n    CAST(ROUND(AVG(CAST(d.logins AS FLOAT)), 0) AS INT) AS [Avg per day],\n    MAX(d.logins)                                    AS [Peak day],\n    MAX(d.[day])                                     AS [Last day]\nFROM dbo.gw_login_daily d\nWHERE $__timeFilter(d.day_ts)\n    AND d.env IN (${env:sqlstring})\n    AND d.product IN (${product:sqlstring})\nGROUP BY d.env, d.product\nORDER BY d.env, d.product;"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": true,
+          "reducer": [
+            "sum"
+          ],
+          "fields": [
+            "Logins"
+          ],
+          "countRows": false,
+          "enablePagination": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Logins"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "Most active users",
+      "description": "Only possible because usernames are stored per day. Note this table holds user identifiers -- treat access accordingly.",
+      "datasource": {
+        "type": "mssql",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "mssql",
+            "uid": "${ds}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT TOP 25\n    username      AS [User],\n    SUM(logins)   AS [Logins],\n    COUNT(DISTINCT [day]) AS [Active days],\n    COUNT(DISTINCT env)   AS [Environments]\nFROM dbo.gw_login_user_daily\nWHERE $__timeFilter(day_ts)\n    AND username <> '(unparsed)'\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY username\nORDER BY SUM(logins) DESC;"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Logins"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "gradient"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "Collector runs (most recent 20)",
+      "description": "Health of the pipeline feeding this dashboard. 'partial' means some Loki queries failed and those cells kept their previous values; the next run's lookback retries them.",
+      "datasource": {
+        "type": "mssql",
+        "uid": "${ds}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "mssql",
+            "uid": "${ds}"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT TOP 20\n    started_at   AS [Started (UTC)],\n    status       AS [Status],\n    days_from    AS [From],\n    days_to      AS [To],\n    rows_written AS [Rows written],\n    query_errors AS [Query errors],\n    build_id     AS [Build],\n    detail       AS [Detail]\nFROM dbo.gw_login_collector_run\nORDER BY started_at DESC;"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Status"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "ok": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "partial": {
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "failed": {
+                        "color": "red",
+                        "index": 2
+                      },
+                      "running": {
+                        "color": "blue",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "refresh": "30m",
+  "schemaVersion": 39,
+  "tags": [
+    "guidewire",
+    "logins",
+    "loki"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "ds",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "mssql",
+        "current": {},
+        "hide": 0,
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false
+      },
+      {
+        "name": "env",
+        "label": "Environment",
+        "type": "query",
+        "datasource": {
+          "type": "mssql",
+          "uid": "${ds}"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "refresh": 1,
+        "sort": 1,
+        "current": {},
+        "options": [],
+        "query": "SELECT DISTINCT env FROM dbo.gw_login_daily ORDER BY env;",
+        "definition": "SELECT DISTINCT env FROM dbo.gw_login_daily ORDER BY env;"
+      },
+      {
+        "name": "product",
+        "label": "Product",
+        "type": "query",
+        "datasource": {
+          "type": "mssql",
+          "uid": "${ds}"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "refresh": 1,
+        "sort": 1,
+        "current": {},
+        "options": [],
+        "query": "SELECT DISTINCT product FROM dbo.gw_login_daily ORDER BY product;",
+        "definition": "SELECT DISTINCT product FROM dbo.gw_login_daily ORDER BY product;"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "6h",
+      "12h",
+      "1d"
+    ]
+  },
+  "timezone": "browser",
+  "title": "Guidewire User Logins (historical)",
+  "uid": "gw-user-logins-hist",
+  "version": 1,
+  "weekStart": ""
+}

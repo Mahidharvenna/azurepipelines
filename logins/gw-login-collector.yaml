@@ -1,0 +1,113 @@
+# Daily login collector: Loki -> SQL Server.
+# Python; standard library plus pyodbc (the only pip dependency).
+#
+# Grafana reads SQL Server, so the dashboard is not capped by Loki's ~30-day
+# retention. Companion to reports/monthly_report.py -- same Loki selector, same
+# LOGIN_USER_REGEX, same REPORT_TIMEZONE, so the numbers reconcile.
+
+# No schedules: block here on purpose -- defining one makes ADO ignore UI
+# scheduled triggers. Manage the schedule in the UI (Edit -> ... -> Triggers).
+#
+# !! Schedule this DAILY. If it stops running for more than ~30 days the missed
+# !! days age out of Loki and are unrecoverable. Keep the staleness alert wired.
+trigger: none
+pr: none
+
+name: 'GW-LoginCollector-$(Date:yyyyMMdd).$(Rev:r)'
+
+parameters:
+# Seed history at go-live, or repair a gap. Blank = normal daily mode.
+- name: backfillStart
+  displayName: 'Backfill start (YYYY-MM-DD). Blank for a normal daily run.'
+  type: string
+  default: ''
+- name: backfillEnd
+  displayName: 'Backfill end (YYYY-MM-DD). Blank means yesterday.'
+  type: string
+  default: ''
+- name: dryRun
+  displayName: 'Dry run -- query Loki, write nothing to the database'
+  type: boolean
+  default: false
+
+# ADO Server 2022 RTW rejects a template expression on pool.name, so this is a
+# literal. Change it to pin the collector to an agent that can reach both Loki
+# and SQL Server.
+pool:
+  name: Default
+
+variables:
+# Database credentials. Point this at your existing DB variable group rather
+# than copying the password into a second place; the env block below maps the
+# names. Needs DBINSTANCE, DBNAME, DBUSER, DBPASS.
+- group: 'gw-logins-db'
+# Loki endpoint and collection scope. Nothing secret.
+- group: 'gw-logins-config'
+
+steps:
+- checkout: self
+  clean: true
+
+# UsePythonVersion@0 only searches the agent tool cache, not a normal install,
+# so it fails on self-hosted agents even when Python is present. Locate the
+# interpreter directly instead.
+- powershell: |
+    $exe = $null
+    foreach ($c in 'python', 'python3', 'py') {
+      $cmd = Get-Command $c -ErrorAction SilentlyContinue
+      if (-not $cmd) { continue }
+      $ver = (& $c --version 2>&1) -join ' '
+      if ($LASTEXITCODE -eq 0 -and $ver -match 'Python 3') {
+        $exe = $cmd.Source; Write-Host "Using $ver  ($exe)"; break
+      }
+    }
+    if (-not $exe) {
+      Write-Error "No Python 3 found on this agent. Install Python 3, tick 'Add to PATH', and restart the agent service."
+      exit 1
+    }
+    Write-Host "##vso[task.setvariable variable=PYTHON_EXE]$exe"
+  displayName: 'Locate Python 3'
+
+# The only pip dependency. SQL Server has no standard-library driver, so this
+# step (and Microsoft's ODBC Driver on the machine) is unavoidable. If the
+# agent has no route to PyPI, vendor a pyodbc wheel and install it from disk.
+- script: '"$(PYTHON_EXE)" -m pip install --disable-pip-version-check pyodbc'
+  displayName: 'Install pyodbc'
+
+- script: '"$(PYTHON_EXE)" logins/collect_logins.py'
+  displayName: 'Collect logins into SQL Server'
+  workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    # --- Loki ---
+    LOKI_URL:            $(LOKI_URL)
+    LOKI_PROJECT:        $(LOKI_PROJECT)
+    LOKI_VERIFY_TLS:     $(LOKI_VERIFY_TLS)
+    BYPASS_PROXY:        $(BYPASS_PROXY)
+    LOKI_LOG_LIMIT:      $(LOKI_LOG_LIMIT)
+    LOKI_RETENTION_DAYS: $(LOKI_RETENTION_DAYS)
+    # --- database (names mapped from the DB variable group) ---
+    DB_SERVER:             $(DBINSTANCE)
+    DB_NAME:               $(DBNAME)
+    DB_USER:               $(DBUSER)
+    DB_PASS:               $(DBPASS)
+    DB_SCHEMA:             $(DB_SCHEMA)
+    DB_ODBC_DRIVER:        $(DB_ODBC_DRIVER)
+    DB_TRUSTED_CONNECTION: $(DB_TRUSTED_CONNECTION)
+    DB_ENCRYPT:            $(DB_ENCRYPT)
+    DB_TRUST_SERVER_CERT:  $(DB_TRUST_SERVER_CERT)
+    # --- scope (mirror the report's variable group) ---
+    ENVS:             $(ENVS)
+    ENVS_EXCLUDE:     $(ENVS_EXCLUDE)
+    PRODUCTS:         $(PRODUCTS)
+    PRODUCT_JOBS:     $(PRODUCT_JOBS)
+    PRODUCT_FRAGS:    $(PRODUCT_FRAGS)
+    LOGIN_USER_REGEX: $(LOGIN_USER_REGEX)
+    REPORT_TIMEZONE:  $(REPORT_TIMEZONE)
+    REPORT_TZ_LABEL:  $(REPORT_TZ_LABEL)
+    STORE_USERNAMES:  $(STORE_USERNAMES)
+    LOOKBACK_DAYS:    $(LOOKBACK_DAYS)
+    # --- run mode ---
+    BACKFILL_START: ${{ parameters.backfillStart }}
+    BACKFILL_END:   ${{ parameters.backfillEnd }}
+    DRY_RUN:        ${{ parameters.dryRun }}
+    BUILD_ID:       $(Build.BuildNumber)

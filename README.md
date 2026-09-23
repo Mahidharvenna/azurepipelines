@@ -26,7 +26,13 @@ templates/
   gw-build.yml             # per-product build (gwb.bat clean/webResources/warTomcatDBCP)
   gw-deploy.yml            # per-product deploy (15-task SSH sequence)
 reports/                   # unrelated: monthly login report -> Excel -> email
+logins/                    # unrelated: daily Loki -> SQL Server -> Grafana history
 ```
+
+`reports/` and `logins/` both count the same `User Login` events and share their
+Loki selector, username regex and timezone settings. The report emails a monthly
+spreadsheet; the collector keeps permanent history for a Grafana dashboard, since
+Loki itself only retains about 30 days.
 
 ## How a run works
 
