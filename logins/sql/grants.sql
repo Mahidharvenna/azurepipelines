@@ -22,19 +22,28 @@
 GO
 
 -- --- 1. Collector: read + write ---------------------------------------------
-IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '$(CollectorLogin)')
+-- Skipped when the collector IS the account running this script -- the usual
+-- case, since that account just created the tables. SQL Server refuses a GRANT
+-- to yourself, and if the account owns the database its user is 'dbo', so
+-- CREATE USER would fail too. It already has every right below.
+IF SUSER_NAME() = N'$(CollectorLogin)'
+    PRINT 'Collector login $(CollectorLogin) is running this script and already has these rights -- skipped.';
+ELSE IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$(CollectorLogin)')
     CREATE USER [$(CollectorLogin)] FOR LOGIN [$(CollectorLogin)];
 GO
 
-GRANT SELECT, INSERT, UPDATE ON dbo.gw_login_daily         TO [$(CollectorLogin)];
-GRANT SELECT, INSERT, UPDATE ON dbo.gw_login_collector_run TO [$(CollectorLogin)];
--- DELETE only on the per-user table: re-collecting a day must clear users who
--- no longer appear, otherwise a corrected day keeps phantom rows.
-GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.gw_login_user_daily TO [$(CollectorLogin)];
+IF SUSER_NAME() <> N'$(CollectorLogin)'
+BEGIN
+    GRANT SELECT, INSERT, UPDATE ON dbo.gw_login_daily         TO [$(CollectorLogin)];
+    GRANT SELECT, INSERT, UPDATE ON dbo.gw_login_collector_run TO [$(CollectorLogin)];
+    -- DELETE only on the per-user table: re-collecting a day must clear users
+    -- who no longer appear, otherwise a corrected day keeps phantom rows.
+    GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.gw_login_user_daily TO [$(CollectorLogin)];
+END
 GO
 
 -- --- 2. Grafana: read only ---------------------------------------------------
-IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = '$(GrafanaLogin)')
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$(GrafanaLogin)')
     CREATE USER [$(GrafanaLogin)] FOR LOGIN [$(GrafanaLogin)];
 GO
 

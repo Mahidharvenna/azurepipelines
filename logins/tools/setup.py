@@ -5,13 +5,16 @@ One-shot bootstrap for the login-history database, run from the pipeline.
 Does the setup that would otherwise need sqlcmd on someone's laptop:
 pre-flight checks, schema, grants, and verification.
 
-Because it uses pyodbc rather than sqlcmd, it has to do three things sqlcmd
-does client-side and the server knows nothing about:
+'check' reports EVERY problem it can find in one run rather than stopping at
+the first -- each miss would otherwise cost a full pipeline round-trip. It
+exits non-zero if anything would stop the collector, even when the database
+side is fine.
+
+Because it uses pyodbc rather than sqlcmd, it does three things sqlcmd does
+client-side and the server knows nothing about:
   * split each file on GO      -- a batch separator, not T-SQL
   * expand :setvar / $(TOKEN)  -- a sqlcmd variable construct
-  * surface PRINT as headings  -- pyodbc does not expose PRINT output, so the
-                                  PRINT lines are lifted out and used to label
-                                  the result set that follows
+  * surface PRINT as headings  -- pyodbc does not expose PRINT output
 
 Configuration comes from environment variables set by the pipeline, so no
 secret is ever passed as an argument (arguments are echoed in the build log).
@@ -27,41 +30,53 @@ Actions
 
 import os
 import re
-import ssl
 import sys
 import json
 import socket
+import platform
 import argparse
 import urllib.parse
 import urllib.request
 
-try:
-    import pyodbc
-except ImportError:
-    raise SystemExit(
-        "pyodbc is not installed. The pipeline installs it; if you are running\n"
-        "this by hand:  python -m pip install pyodbc\n"
-        "It also needs Microsoft's ODBC Driver for SQL Server on the machine."
-    )
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gwcommon import (env, env_bool, harden_stdio, explain_import_error, choose_driver,
+                      odbc_quote, parse_server, explain_connect_error, loki_ssl_context,
+                      is_cert_error, LOKI_CERT_HINT, one_line)
+
+harden_stdio()
+
+MIN_PY = (3, 9)
+# 13.0.4001 = SQL Server 2016 SP1, the first build with CREATE OR ALTER.
+MIN_SQL = (13, 0, 4001)
+EXPECTED_OBJECTS = sorted([
+    "gw_login_daily", "gw_login_user_daily", "gw_login_collector_run",   # tables
+    "gw_login_monthly", "gw_login_monthly_users", "gw_login_freshness",  # views
+])
 
 
 # ---------------------------------------------------------------------------
 # config
 # ---------------------------------------------------------------------------
-def env(name, default=""):
-    v = os.environ.get(name, "")
-    # A variable not defined in the group arrives as the literal "$(NAME)".
-    if v.strip() == "" or (v.strip().startswith("$(") and v.strip().endswith(")")):
-        return default
-    return v
+DB_SERVER = env("DB_SERVER")
+DB_NAME = env("DB_NAME")
+DB_USER = env("DB_USER")
+DB_PASS = env("DB_PASS")
+DB_DRIVER_REQUESTED = env("DB_ODBC_DRIVER")       # blank = newest installed
+DB_TRUSTED = env_bool("DB_TRUSTED_CONNECTION", False)
+DB_ENCRYPT = env_bool("DB_ENCRYPT", True)
+DB_TRUST_CERT = env_bool("DB_TRUST_SERVER_CERT", False)
+
+LOKI_URL = env("LOKI_URL").rstrip("/")
+LOKI_VERIFY = env_bool("LOKI_VERIFY_TLS", True)
+LOKI_CA_BUNDLE = env("LOKI_CA_BUNDLE").strip()
+BYPASS_PROXY = env_bool("BYPASS_PROXY", True)
 
 
-def env_bool(name, default=False):
-    v = env(name).strip().lower()
-    return default if v == "" else v in ("true", "1", "yes", "y")
-
-
-SOFT = []
+# ---------------------------------------------------------------------------
+# output
+# ---------------------------------------------------------------------------
+SOFT = []        # worth knowing, doesn't stop anything
+BLOCKERS = []    # (kind, text); kind 'db' stops schema/grants, 'collector' only fails the run
 
 
 def section(text):
@@ -76,32 +91,52 @@ def info(text):  print("         " + text, flush=True)
 
 def soft(text):
     SOFT.append(text)
-    print("##vso[task.logissue type=warning]" + text, flush=True)
+    print("##vso[task.logissue type=warning]" + one_line(text), flush=True)
 
 
-DB_SERVER = env("DB_SERVER")
-DB_NAME = env("DB_NAME")
-DB_USER = env("DB_USER")
-DB_PASS = env("DB_PASS")
-DB_DRIVER = env("DB_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
-DB_TRUSTED = env_bool("DB_TRUSTED_CONNECTION", False)
-DB_ENCRYPT = env_bool("DB_ENCRYPT", True)
-DB_TRUST_CERT = env_bool("DB_TRUST_SERVER_CERT", False)
+def blocker(kind, text):
+    BLOCKERS.append((kind, text))
+    print("##vso[task.logissue type=error]" + one_line(text), flush=True)
 
-LOKI_URL = env("LOKI_URL").rstrip("/")
-LOKI_VERIFY = env_bool("LOKI_VERIFY_TLS", True)
-BYPASS_PROXY = env_bool("BYPASS_PROXY", True)
-LOKI_PROJECT = env("LOKI_PROJECT", "myproject")
+
+# ---------------------------------------------------------------------------
+# database
+# ---------------------------------------------------------------------------
+_pyodbc = None
+_driver = None
+
+
+def get_pyodbc():
+    """Import pyodbc lazily, so 'check' can still report everything else when
+    the ODBC stack is missing."""
+    global _pyodbc
+    if _pyodbc is None:
+        try:
+            import pyodbc
+        except ImportError as ex:
+            raise SystemExit(explain_import_error(ex))
+        _pyodbc = pyodbc
+    return _pyodbc
+
+
+def get_driver():
+    global _driver
+    if _driver is None:
+        driver, problem = choose_driver(get_pyodbc().drivers(), DB_DRIVER_REQUESTED)
+        if problem:
+            raise SystemExit(problem)
+        _driver = driver
+    return _driver
 
 
 def connection_string():
-    parts = ["DRIVER={%s}" % DB_DRIVER, "SERVER=%s" % DB_SERVER, "DATABASE=%s" % DB_NAME]
+    parts = ["DRIVER={%s}" % get_driver(), "SERVER=%s" % DB_SERVER, "DATABASE=%s" % DB_NAME]
     if DB_TRUSTED:
         parts.append("Trusted_Connection=yes")
     else:
         if not DB_USER:
             raise SystemExit("Set DB_USER/DB_PASS, or DB_TRUSTED_CONNECTION=true.")
-        parts += ["UID=%s" % DB_USER, "PWD=%s" % DB_PASS]
+        parts += ["UID=%s" % odbc_quote(DB_USER), "PWD=%s" % odbc_quote(DB_PASS)]
     parts.append("Encrypt=yes" if DB_ENCRYPT else "Encrypt=no")
     if DB_TRUST_CERT:
         parts.append("TrustServerCertificate=yes")
@@ -110,20 +145,64 @@ def connection_string():
 
 
 def connect():
-    cn = pyodbc.connect(connection_string(), timeout=30)
+    p = get_pyodbc()
+    try:
+        cn = p.connect(connection_string(), timeout=30)
+    except p.Error as ex:
+        raise SystemExit(explain_connect_error(ex, DB_SERVER, DB_NAME))
     cn.autocommit = True          # DDL and GRANT; no transaction to manage
     return cn
 
 
-def scalar(query):
+def query(sql):
     cn = connect()
     try:
         cur = cn.cursor()
-        cur.execute(query)
-        row = cur.fetchone()
-        return row[0] if row else None
+        try:
+            cur.execute(sql)
+        except get_pyodbc().Error as ex:
+            raise SystemExit("Query failed: %s\n  query: %s" % (ex, " ".join(sql.split())[:160]))
+        return cur.fetchall() if cur.description else []
     finally:
         cn.close()
+
+
+def scalar(sql):
+    rows = query(sql)
+    return rows[0][0] if rows else None
+
+
+# What the collector does to each table; the collector connects as DBUSER.
+COLLECTOR_DML = [
+    ("gw_login_daily", ("SELECT", "INSERT", "UPDATE")),
+    ("gw_login_collector_run", ("SELECT", "INSERT", "UPDATE")),
+    ("gw_login_user_daily", ("SELECT", "INSERT", "UPDATE", "DELETE")),
+]
+
+
+def missing_dml():
+    """Rights the RUNNING login lacks on the collector's tables. Creating a table
+    in dbo does not make you its owner -- the schema owner owns it -- so a
+    db_ddladmin account can build the tables and still be unable to write them."""
+    checks = " UNION ALL ".join(
+        "SELECT '%s on %s' AS need, HAS_PERMS_BY_NAME('dbo.%s','OBJECT','%s') AS has"
+        % (perm, table, table, perm)
+        for table, perms in COLLECTOR_DML for perm in perms)
+    return [need for need, has in query(checks) if has != 1]
+
+
+def is_running_login(name):
+    """Compare with SQL Server's own rules (collation), exactly as grants.sql's
+    IF SUSER_NAME() guard will -- a Python .lower() could disagree with a
+    case-sensitive server and send a GRANT to yourself."""
+    return scalar("SELECT CASE WHEN SUSER_NAME() = N'%s' THEN 1 ELSE 0 END"
+                  % (name or "").replace("'", "''")) == 1
+
+
+def existing_objects():
+    names = ", ".join("'%s'" % n for n in EXPECTED_OBJECTS)
+    return sorted(r[0] for r in query(
+        "SELECT name FROM sys.objects WHERE schema_id = SCHEMA_ID('dbo') AND name IN (%s)" % names))
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +224,9 @@ def expand_setvar(text, overrides=None):
     for k, v in (overrides or {}).items():
         if v:
             variables[k] = v
+    for k, v in variables.items():
+        if v.startswith("your_"):
+            raise SystemExit("%s is still the placeholder '%s' -- pass the real value." % (k, v))
     kept = [l for l in text.split("\n") if not re.match(r"^\s*:setvar\s", l)]
     out = "\n".join(kept)
     for k, v in variables.items():
@@ -252,97 +334,214 @@ def tcp_ok(host, port, timeout=6):
         return False
 
 
+def resolves(host):
+    try:
+        socket.getaddrinfo(host, None)
+        return True
+    except Exception:
+        return False
+
+
+def version_tuple(text):
+    return tuple(int(x) for x in re.findall(r"\d+", str(text))[:3])
+
+
 def preflight():
     section("Pre-flight")
 
-    # --- 1. TCP reachability -------------------------------------------------
-    sql_host, sql_port = DB_SERVER, 1433
-    if "," in DB_SERVER:
-        sql_host, _, p = DB_SERVER.partition(",")
-        sql_port = int(p)
-    elif ":" in DB_SERVER and DB_SERVER.count(":") == 1:
-        sql_host, _, p = DB_SERVER.partition(":")
-        sql_port = int(p)
+    # --- 1. this agent -------------------------------------------------------
+    info("agent: %s" % platform.platform())
+    if sys.version_info >= MIN_PY:
+        ok("Python %s (%s)" % (platform.python_version(), sys.executable))
+    else:
+        blocker("db", "Python %s is older than %d.%d." % ((platform.python_version(),) + MIN_PY))
+    if DB_TRUSTED and os.name != "nt":
+        soft("DB_TRUSTED_CONNECTION=true on a non-Windows agent means Kerberos: the agent "
+             "account needs a ticket. SQL auth (the default) needs none.")
 
-    if tcp_ok(sql_host, sql_port):
+    # --- 2. network ------------------------------------------------------------
+    try:
+        sql_host, sql_port, instance = parse_server(DB_SERVER)
+    except SystemExit as ex:
+        blocker("db", str(ex))
+        sql_host = None
+    if sql_host is None:
+        pass
+    elif sql_port is None:
+        if resolves(sql_host):
+            ok("SQL Server host resolves: %s (named instance '%s' -- port comes from SQL "
+               "Browser on UDP 1434, so no TCP probe)" % (sql_host, instance))
+        else:
+            blocker("db", "Cannot resolve SQL Server host '%s' from this agent." % sql_host)
+    elif tcp_ok(sql_host, sql_port):
         ok("SQL Server reachable: %s:%d" % (sql_host, sql_port))
     else:
-        raise SystemExit("Cannot reach %s:%d from this agent. Wrong host, a firewall, "
-                         "or the collector needs a different agent pool." % (sql_host, sql_port))
+        blocker("db", "Cannot reach %s:%d from this agent -- wrong host, a firewall, or this "
+                      "agent sits on a network without a route to SQL Server."
+                % (sql_host, sql_port))
 
-    if LOKI_URL:
+    # Loki problems don't stop the database setup, but the collector can't run
+    # without Loki, so they fail the run rather than hiding in a yellow warning.
+    if not LOKI_URL:
+        blocker("collector", "LOKI_URL is not set -- the collector cannot run.")
+    else:
         u = urllib.parse.urlparse(LOKI_URL)
         lport = u.port or (443 if u.scheme == "https" else 80)
-        if tcp_ok(u.hostname, lport):
-            ok("Loki reachable: %s:%d" % (u.hostname, lport))
+        # Through a proxy (BYPASS_PROXY=false) a direct TCP connect proves nothing
+        # either way; the HTTP probe below uses the same route as the collector.
+        reachable = True
+        if BYPASS_PROXY:
+            reachable = tcp_ok(u.hostname, lport)
+            if reachable:
+                ok("Loki reachable: %s:%d" % (u.hostname, lport))
+            else:
+                blocker("collector", "Cannot reach Loki at %s:%d from this agent."
+                        % (u.hostname, lport))
         else:
-            soft("Cannot reach Loki at %s:%d. The collector will fail even though "
-                 "the database is fine." % (u.hostname, lport))
-    else:
-        soft("LOKI_URL is not set -- skipping the Loki probe.")
+            info("BYPASS_PROXY=false -- Loki is probed over HTTP through the proxy only.")
+        if reachable:
+            try:
+                if not LOKI_VERIFY:
+                    info("LOKI_VERIFY_TLS is false -- certificate validation disabled.")
+                handlers = [urllib.request.HTTPSHandler(
+                    context=loki_ssl_context(LOKI_VERIFY, LOKI_CA_BUNDLE, soft))]
+                if BYPASS_PROXY:
+                    handlers.append(urllib.request.ProxyHandler({}))
+                opener = urllib.request.build_opener(*handlers)
+                with opener.open(LOKI_URL + "/loki/api/v1/labels", timeout=30) as r:
+                    labels = json.loads(r.read().decode("utf-8")).get("data") or []
+                ok("Loki answered. %d label(s): %s" % (len(labels), ", ".join(labels[:8])))
+                for needed in ("env", "project", "job"):
+                    if needed not in labels:
+                        blocker("collector", "Loki has no '%s' label -- the collector's selector "
+                                             "will match nothing." % needed)
+            except Exception as ex:
+                if is_cert_error(ex):
+                    blocker("collector", LOKI_CERT_HINT + " (%s)" % ex)
+                else:
+                    blocker("collector", "Loki HTTP probe failed: %s. Check BYPASS_PROXY." % ex)
 
-    # --- 2. Loki actually answers -------------------------------------------
-    if LOKI_URL:
+    # --- 3. ODBC stack -----------------------------------------------------------
+    try:
+        p = get_pyodbc()
+        ok("pyodbc %s" % getattr(p, "version", "?"))
+        installed = p.drivers()
+        info("ODBC drivers on this agent: %s" % (", ".join(installed) or "none"))
+        driver = get_driver()
+        ok("using %s%s" % (driver, "" if DB_DRIVER_REQUESTED else " (newest installed)"))
+    except SystemExit as ex:
+        blocker("db", str(ex))
+        return                          # nothing below can run without a driver
+
+    # --- 4. database ---------------------------------------------------------
+    global DB_TRUST_CERT
+    configured_trust = DB_TRUST_CERT
+    try:
+        _database_checks()
+    except SystemExit as ex:
+        blocker("db", str(ex))
+    finally:
+        DB_TRUST_CERT = configured_trust
+
+
+def _database_checks():
+    global DB_TRUST_CERT
+    try:
+        version = str(scalar("SELECT @@VERSION") or "")
+    except SystemExit as ex:
+        first = str(ex)
+        if DB_TRUST_CERT or "TLS:" not in first:
+            raise
+        # A certificate problem hides everything behind it -- credentials,
+        # version, rights -- and would cost a second run to discover. Retry once
+        # without validating the certificate, for this diagnosis only.
+        info("TLS failed -- retrying once with TrustServerCertificate=yes (diagnosis only, "
+             "this run only) to check everything behind it.")
+        DB_TRUST_CERT = True
         try:
-            handlers = []
-            if BYPASS_PROXY:
-                handlers.append(urllib.request.ProxyHandler({}))
-            if not LOKI_VERIFY:
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                handlers.append(urllib.request.HTTPSHandler(context=ctx))
-                info("LOKI_VERIFY_TLS is false -- certificate validation disabled.")
-            opener = urllib.request.build_opener(*handlers)
-            with opener.open(LOKI_URL + "/loki/api/v1/labels", timeout=30) as r:
-                labels = json.loads(r.read().decode("utf-8")).get("data") or []
-            ok("Loki answered. %d label(s): %s" % (len(labels), ", ".join(labels[:8])))
-            for needed in ("env", "project", "job"):
-                if needed not in labels:
-                    soft("Loki has no '%s' label -- the collector's selector will match "
-                         "nothing." % needed)
-        except Exception as ex:
-            soft("Loki HTTP probe failed: %s. Check TLS trust or BYPASS_PROXY." % ex)
+            version = str(scalar("SELECT @@VERSION") or "")
+        except SystemExit as ex2:
+            if "TLS:" in str(ex2):
+                raise SystemExit(first + "\n  -> TrustServerCertificate=yes fails the same way, "
+                                 "so DB_TRUST_SERVER_CERT will NOT fix this: it is a TLS protocol "
+                                 "mismatch (e.g. a SQL Server without TLS 1.2), not certificate trust.")
+            blocker("db", first)
+            raise
+        blocker("db", first + "\n  -> Confirmed: it connects with TrustServerCertificate=yes, and "
+                      "the checks below ran that way. Set DB_TRUST_SERVER_CERT=true, or install "
+                      "the issuing CA on the agent.")
 
-    # --- 3. Database engine and rights ---------------------------------------
-    drivers = [d for d in pyodbc.drivers() if "SQL Server" in d]
-    if drivers:
-        ok("ODBC drivers: %s" % "; ".join(drivers))
-        if DB_DRIVER not in drivers:
-            soft("DB_ODBC_DRIVER is '%s' but that is not installed. Set it to one of "
-                 "the above." % DB_DRIVER)
-    else:
-        raise SystemExit("No SQL Server ODBC driver installed. Install Microsoft's "
-                         "ODBC Driver 17 or 18 on this agent.")
-
-    version = str(scalar("SELECT @@VERSION") or "")
-    first = version.split("\n")[0].strip()
-    ok("Connected. %s" % first)
+    ok("Connected. %s" % version.split("\n")[0].strip())
     if "Microsoft SQL Server" not in version:
-        raise SystemExit("This is not Microsoft SQL Server. The schema and the ten "
-                         "dashboard panels are T-SQL and need a dialect pass first.")
+        blocker("db", "This is not Microsoft SQL Server. The schema and the ten dashboard "
+                      "panels are T-SQL and need a dialect pass first.")
+        return
 
-    who = scalar("SELECT CONCAT(SUSER_NAME(), ' / ', USER_NAME(), ' @ ', DB_NAME())")
+    edition = scalar("SELECT CAST(SERVERPROPERTY('EngineEdition') AS INT)")
+    product = scalar("SELECT CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(32))")
+    if edition in (5, 8):
+        ok("Azure SQL (engine edition %s) -- supports everything schema.sql uses" % edition)
+    elif version_tuple(product) >= MIN_SQL:
+        ok("SQL Server build %s (>= 2016 SP1)" % product)
+    else:
+        blocker("db", "SQL Server build %s is older than 2016 SP1 (13.0.4001), which "
+                      "schema.sql needs for CREATE OR ALTER." % product)
+
+    # '+' rather than CONCAT, which SQL Server 2008 lacks -- this line must not be
+    # the thing that crashes after the version check has already said why.
+    who = scalar("SELECT SUSER_NAME() + ' / ' + USER_NAME() + ' @ ' + DB_NAME()")
     info("identity: %s" % who)
 
-    if scalar("SELECT HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','CREATE TABLE')") == 1:
-        ok("account can CREATE TABLE in [%s]" % DB_NAME)
+    # What schema.sql actually needs: creating in dbo takes ALTER on the schema
+    # as well as CREATE TABLE, and the views need CREATE VIEW.
+    if scalar("SELECT CASE WHEN HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','CREATE TABLE') = 1 "
+              "AND HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','CREATE VIEW') = 1 "
+              "AND HAS_PERMS_BY_NAME('dbo','SCHEMA','ALTER') = 1 THEN 1 ELSE 0 END") == 1:
+        ok("can create tables and views in dbo (needed by 'schema')")
     else:
-        soft("This account cannot CREATE TABLE in [%s]. A DBA must run schema.sql "
-             "once; afterwards it only needs the DML in grants.sql." % DB_NAME)
+        soft("This account cannot create tables and views in dbo (needs CREATE TABLE, "
+             "CREATE VIEW and ALTER on SCHEMA::dbo). A DBA must run schema.sql once.")
+    # What grants.sql needs: create users, and grant on dbo objects.
+    if scalar("SELECT CASE WHEN HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','ALTER ANY USER') = 1 "
+              "AND (HAS_PERMS_BY_NAME('dbo','SCHEMA','CONTROL') = 1 "
+              "OR IS_ROLEMEMBER('db_securityadmin') = 1) THEN 1 ELSE 0 END") == 1:
+        ok("can create database users and grant on dbo (needed by 'grants')")
+    else:
+        soft("This account cannot create database users and grant on dbo, so 'grants' will "
+             "fail -- a DBA must run grants.sql.")
 
-    n = scalar("SELECT COUNT(*) FROM sys.objects WHERE name LIKE 'gw_login%'")
-    info("existing gw_login* objects: %s  (7 once schema.sql has run)" % n)
-
-    # --- 4. Collector prerequisites -----------------------------------------
-    ok("Python: %s" % sys.version.split()[0])
-    if sys.version_info < (3, 7):
-        soft("Python %s is older than 3.7, which the collector needs." % sys.version.split()[0])
+    present = existing_objects()
+    info("gw_login objects present: %d of %d%s" % (
+        len(present), len(EXPECTED_OBJECTS),
+        "" if present else "  (normal before 'schema' has run)"))
+    if all(t in present for t, _ in COLLECTOR_DML):
+        lacking = missing_dml()
+        if lacking:
+            blocker("collector", "The collector runs as '%s', which lacks: %s. A DBA must grant "
+                                 "these (or run grants.sql with this login as CollectorLogin)."
+                    % (DB_USER or who, ", ".join(lacking)))
+        else:
+            ok("the collector's login can read and write all three tables")
 
 
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+def finish():
+    section("Done")
+    if SOFT:
+        print("%d warning(s):" % len(SOFT))
+        for w in SOFT:
+            print("  - %s" % w)
+    if BLOCKERS:
+        print("%d problem(s) that must be fixed:" % len(BLOCKERS))
+        for kind, text in BLOCKERS:
+            print("  - [%s] %s" % (kind, text))
+        return 1
+    print("No problems found.")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -354,30 +553,38 @@ def main():
     args = ap.parse_args()
 
     if not DB_SERVER or not DB_NAME:
-        raise SystemExit("DB_SERVER and DB_NAME must be set. Is the variable group "
+        raise SystemExit("DB_SERVER and DB_NAME must be set. Is the DB variable group "
                          "linked to this pipeline?")
-
-    collector = args.collector_login or DB_USER
 
     print("Action           : %s" % args.action)
     print("Database         : %s / %s" % (DB_SERVER, DB_NAME))
-    print("Auth             : %s" % ("Windows integrated" if DB_TRUSTED
-                                     else "SQL login '%s'" % DB_USER))
+    print("Auth             : %s" % ("integrated" if DB_TRUSTED else "SQL login '%s'" % DB_USER))
     print("Encrypt          : %s  (TrustServerCertificate=%s)" % (DB_ENCRYPT, DB_TRUST_CERT))
 
     if args.action in ("check", "all"):
         preflight()
+        if args.action == "all" and any(kind == "db" for kind, _ in BLOCKERS):
+            print("\nDatabase problems above -- not attempting schema, grants or verify.")
+            return finish()
 
     if args.action in ("schema", "all"):
         section("Apply schema")
         run_sql_file(os.path.join(args.sql_root, "schema.sql"))
-        n = scalar("SELECT COUNT(*) FROM sys.objects WHERE name LIKE 'gw_login%'")
-        if n < 7:
-            raise SystemExit("Expected 7 gw_login* objects after schema.sql, found %s." % n)
-        ok("%s objects present" % n)
+        present = existing_objects()
+        missing = [n for n in EXPECTED_OBJECTS if n not in present]
+        if missing:
+            raise SystemExit("schema.sql ran but these objects are missing: %s" % ", ".join(missing))
+        ok("all %d objects present: %s" % (len(present), ", ".join(present)))
+        lacking = missing_dml()
+        if lacking:
+            soft("Tables created, but this login lacks %s on them -- creating a table in dbo "
+                 "does not make you its owner. 'grants' will stop on this; a DBA must grant them."
+                 % ", ".join(lacking))
 
     if args.action in ("grants", "all"):
         section("Apply grants")
+        running_as = scalar("SELECT SUSER_NAME()")
+        collector = args.collector_login or DB_USER or running_as
         if not args.grafana_login:
             raise SystemExit("grants needs --grafana-login. Create a read-only SQL login "
                              "for Grafana first; it must never be the collector's account.")
@@ -386,9 +593,23 @@ def main():
                              "must be read-only: panels run ad-hoc SQL that any dashboard "
                              "editor can change, and these tables are the only copy of the "
                              "history.")
+        self_is_collector = is_running_login(collector)
+        if self_is_collector:
+            info("collector login '%s' is the account running this, so grants.sql skips its "
+                 "grants -- SQL Server refuses a grant to yourself. Checking it already has "
+                 "them instead." % collector)
         run_sql_file(os.path.join(args.sql_root, "grants.sql"),
                      overrides={"CollectorLogin": collector,
                                 "GrafanaLogin": args.grafana_login})
+        if self_is_collector:
+            lacking = missing_dml()
+            if lacking:
+                raise SystemExit(
+                    "'%s' runs this pipeline and the collector, but lacks: %s. It cannot grant "
+                    "these to itself -- a DBA must, e.g. add it to db_datareader and "
+                    "db_datawriter, or GRANT them on the three gw_login tables."
+                    % (collector, ", ".join(lacking)))
+            ok("collector login '%s' already has every right it needs" % collector)
 
     if args.action in ("verify", "all"):
         section("Verify")
@@ -397,14 +618,7 @@ def main():
         info("Sections 3 (gaps) and 4 (per-user reconciliation) must be empty.")
         info("Before the first backfill, every section being empty is expected.")
 
-    section("Done")
-    if SOFT:
-        print("Completed with %d warning(s):" % len(SOFT))
-        for w in SOFT:
-            print("  - %s" % w)
-    else:
-        print("No warnings.")
-    return 0
+    return finish()
 
 
 if __name__ == "__main__":

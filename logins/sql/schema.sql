@@ -9,6 +9,20 @@
 -- =============================================================================
 
 SET NOCOUNT ON;
+
+-- Required for the indexes on the computed day_ts columns below. They must be
+-- set in an EARLIER batch than the CREATE INDEX: QUOTED_IDENTIFIER is applied at
+-- parse time. ODBC clients (pyodbc, Grafana) default to these already; sqlcmd
+-- does NOT -- it defaults QUOTED_IDENTIFIER OFF, which makes CREATE INDEX fail
+-- with Msg 1934 while the table is still created, so a re-run skips it and the
+-- index is never built.
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_NULLS ON;
+SET ANSI_PADDING ON;
+SET ANSI_WARNINGS ON;
+SET ARITHABORT ON;
+SET CONCAT_NULL_YIELDS_NULL ON;
+SET NUMERIC_ROUNDABORT OFF;
 GO
 
 -- -----------------------------------------------------------------------------
@@ -70,7 +84,13 @@ BEGIN
         [day]        DATE          NOT NULL,
         env          VARCHAR(32)   NOT NULL,
         product      VARCHAR(8)    NOT NULL,
-        username     NVARCHAR(128) NOT NULL,
+        -- Binary collation on purpose. The collector counts usernames with
+        -- Python's case-sensitive string equality; under the usual
+        -- case-insensitive database collation 'JSmith' and 'jsmith' would hit
+        -- the same key, the second MERGE would overwrite the first, and logins
+        -- would vanish without an error. BIN2 makes the key, the PK and
+        -- COUNT(DISTINCT username) agree with the collector and the report.
+        username     NVARCHAR(128) COLLATE Latin1_General_100_BIN2 NOT NULL,
         logins       INT           NOT NULL,
         collected_at DATETIME2(0)  NOT NULL
             CONSTRAINT DF_gw_login_user_daily_collected_at DEFAULT (SYSUTCDATETIME()),

@@ -48,9 +48,17 @@ parameters:
   default: ''
 
 # ADO Server 2022 RTW rejects a template expression on pool.name, so this is a
-# literal. It must be an agent that can reach both Loki and SQL Server.
+# literal. Demands are fine under a literal name.
+#
+# Pinned to Linux: the steps below are bash, and the ODBC driver is installed
+# per machine, so the setup 'check' and the daily collector must land on the
+# same kind of agent. If 'Default' holds more than one Linux agent, either give
+# every one of them the prerequisites (DEPLOY.md) or pin the one that has them:
+#   - Agent.Name -equals <agent-name>
 pool:
   name: Default
+  demands:
+  - Agent.OS -equals Linux
 
 variables:
 # Database credentials. Point this at your existing DB variable group; the env
@@ -69,28 +77,22 @@ steps:
 - checkout: self
   clean: true
 
-# UsePythonVersion@0 only searches the agent tool cache, not a normal install,
-# so it fails on self-hosted agents even when Python is present. Locate the
-# interpreter directly instead.
-- powershell: |
-    $exe = $null
-    foreach ($c in 'python', 'python3', 'py') {
-      $cmd = Get-Command $c -ErrorAction SilentlyContinue
-      if (-not $cmd) { continue }
-      $ver = (& $c --version 2>&1) -join ' '
-      if ($LASTEXITCODE -eq 0 -and $ver -match 'Python 3') {
-        $exe = $cmd.Source; Write-Host "Using $ver  ($exe)"; break
-      }
-    }
-    if (-not $exe) {
-      Write-Error "No Python 3 found on this agent. Install Python 3, tick 'Add to PATH', and restart the agent service."
-      exit 1
-    }
-    Write-Host "##vso[task.setvariable variable=PYTHON_EXE]$exe"
-  displayName: 'Locate Python 3'
-
-- script: '"$(PYTHON_EXE)" -m pip install --disable-pip-version-check pyodbc'
-  displayName: 'Install pyodbc'
+# UsePythonVersion@0 only searches the agent tool cache, so it fails on
+# self-hosted agents even with Python installed. prepare_python.sh picks the
+# newest python3 >= 3.9 on PATH, builds a job-local venv (avoids PEP 668 and
+# old system pip), installs pyodbc into it, prints what the agent has, and sets
+# $(PYTHON_EXE). It is a file rather than inline so ADO cannot macro-expand the
+# $(...) inside it.
+- script: bash logins/tools/prepare_python.sh "$(Agent.TempDirectory)"
+  displayName: 'Prepare Python'
+  env:
+    # Only needed when the agent can't reach PyPI (DEPLOY.md 0.4). Mapped
+    # explicitly so a feed URL holding a credential can be a secret variable --
+    # ADO never exposes a secret to a script unless it is mapped. Undefined ones
+    # arrive as the literal $(NAME), which the script discards.
+    PIP_INDEX_URL:       $(PIP_INDEX_URL)
+    PIP_EXTRA_INDEX_URL: $(PIP_EXTRA_INDEX_URL)
+    HTTPS_PROXY:         $(HTTPS_PROXY)
 
 - script: >-
     "$(PYTHON_EXE)" logins/tools/setup.py
@@ -114,4 +116,5 @@ steps:
     LOKI_URL:              $(LOKI_URL)
     LOKI_PROJECT:          $(LOKI_PROJECT)
     LOKI_VERIFY_TLS:       $(LOKI_VERIFY_TLS)
+    LOKI_CA_BUNDLE:        $(LOKI_CA_BUNDLE)      # optional: internal CA .pem for Loki
     BYPASS_PROXY:          $(BYPASS_PROXY)

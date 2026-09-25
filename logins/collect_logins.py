@@ -26,7 +26,6 @@ Modes
 
 import os
 import re
-import ssl
 import sys
 import json
 import time
@@ -34,33 +33,32 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-try:
-    import pyodbc
-except ImportError:
-    raise SystemExit(
-        "pyodbc is not installed. On the agent:  python -m pip install pyodbc\n"
-        "It also needs Microsoft's ODBC Driver for SQL Server on the machine.\n"
-        "See DEPLOY.md -> 'Agent prerequisites'."
-    )
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
+from gwcommon import (env, env_bool, harden_stdio, explain_import_error, choose_driver,
+                      odbc_quote, explain_connect_error, loki_ssl_context, is_cert_error,
+                      LOKI_CERT_HINT)
+
+harden_stdio()
+
+# pyodbc is imported only when the database is actually used, so a dry run
+# needs no ODBC stack, and a missing unixODBC is reported as exactly that.
+pyodbc = None
+
+
+def get_pyodbc():
+    global pyodbc
+    if pyodbc is None:
+        try:
+            import pyodbc as _pyodbc
+        except ImportError as ex:
+            raise SystemExit(explain_import_error(ex))
+        pyodbc = _pyodbc
+    return pyodbc
 
 
 # --------------------------------------------------------------------------
 # config
 # --------------------------------------------------------------------------
-def env(name, default=""):
-    v = os.environ.get(name, "")
-    # A variable not defined in the group arrives as the literal "$(NAME)"
-    # rather than empty; treat that as unset.
-    if v.strip() == "" or (v.strip().startswith("$(") and v.strip().endswith(")")):
-        return default
-    return v
-
-
-def env_bool(name, default=False):
-    v = env(name).strip().lower()
-    if v == "":
-        return default
-    return v in ("true", "1", "yes")
 
 
 def split_list(value):
@@ -78,6 +76,7 @@ def log(msg):
 LOKI_URL = env("LOKI_URL", "https://your-loki-host.example.com:3100").rstrip("/")
 LOKI_PROJECT = env("LOKI_PROJECT", "myproject")
 VERIFY_TLS = env_bool("LOKI_VERIFY_TLS", True)
+LOKI_CA_BUNDLE = env("LOKI_CA_BUNDLE").strip()
 BYPASS_PROXY = env_bool("BYPASS_PROXY", True)
 LOG_LIMIT = int(env("LOKI_LOG_LIMIT", "5000"))
 HTTP_TIMEOUT = int(env("LOKI_HTTP_TIMEOUT", "180"))
@@ -113,7 +112,7 @@ DB_SERVER = env("DB_SERVER")
 DB_NAME = env("DB_NAME")
 DB_USER = env("DB_USER")
 DB_PASS = env("DB_PASS")
-DB_DRIVER = env("DB_ODBC_DRIVER", "ODBC Driver 18 for SQL Server")
+DB_DRIVER = env("DB_ODBC_DRIVER")               # blank = newest installed
 DB_SCHEMA = env("DB_SCHEMA", "dbo")
 DB_TRUSTED = env_bool("DB_TRUSTED_CONNECTION", False)
 DB_ENCRYPT = env_bool("DB_ENCRYPT", True)
@@ -204,6 +203,23 @@ def from_utc(utc_naive):
 TZ_LABEL = env("REPORT_TZ_LABEL", REPORT_TZ or "UTC")
 
 
+def tz_rule():
+    """How REPORT_TIMEZONE is being resolved. The built-in Eastern rules behave
+    identically on every OS; any other name goes through zoneinfo, which on a
+    Windows agent without the 'tzdata' package falls back to UTC -- so the
+    report and this collector could bucket days differently."""
+    if not REPORT_TZ:
+        return "UTC"
+    if REPORT_TZ.strip().lower() in _EASTERN:
+        return "built-in Eastern rules"
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(REPORT_TZ)
+        return "zoneinfo"
+    except Exception:
+        return "UNRESOLVED -- falling back to UTC"
+
+
 def today_local():
     now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
     return (from_utc(now_utc) if REPORT_TZ else now_utc).date()
@@ -216,18 +232,12 @@ def _unix_ns(dt):
     return int((dt - datetime(1970, 1, 1)).total_seconds()) * 1_000_000_000
 
 
-_ssl_ctx = None
 if not VERIFY_TLS:
     log("LOKI_VERIFY_TLS is false -- certificate validation disabled for this run.")
-    _ssl_ctx = ssl.create_default_context()
-    _ssl_ctx.check_hostname = False
-    _ssl_ctx.verify_mode = ssl.CERT_NONE
-
-_handlers = []
+_handlers = [urllib.request.HTTPSHandler(
+    context=loki_ssl_context(VERIFY_TLS, LOKI_CA_BUNDLE, lambda m: warn(m)))]
 if BYPASS_PROXY:
     _handlers.append(urllib.request.ProxyHandler({}))
-if _ssl_ctx is not None:
-    _handlers.append(urllib.request.HTTPSHandler(context=_ssl_ctx))
 _opener = urllib.request.build_opener(*_handlers)
 
 
@@ -242,6 +252,8 @@ def loki_get(path, params, timeout=None):
             last = ex
             if attempt < 3:
                 time.sleep(2 ** attempt)
+    if last is not None and is_cert_error(last):
+        raise RuntimeError("%s: %s -- %s" % (path, last, LOKI_CERT_HINT))
     raise RuntimeError("%s: %s" % (path, last))
 
 
@@ -287,7 +299,7 @@ def fetch_day_events(day_local, env_label, product):
             break
         rows.sort(key=lambda x: x[0])
         for ts_ns, line in rows:
-            when_utc = datetime.utcfromtimestamp(ts_ns / 1e9)
+            when_utc = datetime.fromtimestamp(ts_ns / 1e9, timezone.utc).replace(tzinfo=None)
             when = from_utc(when_utc) if REPORT_TZ else when_utc
             m = USER_RE.search(line)
             user = m.group("user") if (m and m.groupdict().get("user")) else ""
@@ -372,18 +384,26 @@ def target_days():
 # sql server
 # --------------------------------------------------------------------------
 def connect():
-    parts = ["DRIVER={%s}" % DB_DRIVER, "SERVER=%s" % DB_SERVER, "DATABASE=%s" % DB_NAME]
+    p = get_pyodbc()
+    driver, problem = choose_driver(p.drivers(), DB_DRIVER)
+    if problem:
+        raise SystemExit(problem)
+    parts = ["DRIVER={%s}" % driver, "SERVER=%s" % DB_SERVER, "DATABASE=%s" % DB_NAME]
     if DB_TRUSTED:
         parts.append("Trusted_Connection=yes")
     else:
         if not DB_USER:
             raise SystemExit("Set DB_USER/DB_PASS, or DB_TRUSTED_CONNECTION=true.")
-        parts += ["UID=%s" % DB_USER, "PWD=%s" % DB_PASS]
+        parts += ["UID=%s" % odbc_quote(DB_USER), "PWD=%s" % odbc_quote(DB_PASS)]
     parts.append("Encrypt=yes" if DB_ENCRYPT else "Encrypt=no")
     if DB_TRUST_CERT:
         parts.append("TrustServerCertificate=yes")
-    cn = pyodbc.connect(";".join(parts) + ";", timeout=DB_TIMEOUT)
+    try:
+        cn = p.connect(";".join(parts) + ";", timeout=DB_TIMEOUT)
+    except p.Error as ex:
+        raise SystemExit(explain_connect_error(ex, DB_SERVER, DB_NAME))
     cn.autocommit = False
+    log("ODBC driver      : %s" % driver)
     return cn
 
 
@@ -451,7 +471,7 @@ def main():
     log("Days             : %s to %s  (%d)" % (days[0], days[-1], len(days)))
     log("Environments     : %s" % ", ".join(ENVS))
     log("Centres          : %s" % ", ".join(PRODUCTS))
-    log("Day boundaries   : %s" % TZ_LABEL)
+    log("Day boundaries   : %s (%s)" % (TZ_LABEL, tz_rule()))
     log("Loki             : %s  (project=%s, proxy %s)" % (
         LOKI_URL, LOKI_PROJECT, "bypassed" if BYPASS_PROXY else "system"))
     log("Database         : %s/%s.%s   dry_run=%s" % (DB_SERVER or "-", DB_NAME or "-", DB_SCHEMA, DRY_RUN))

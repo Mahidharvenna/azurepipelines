@@ -38,6 +38,8 @@ nobody purges.
 | `gw-login-collector.yaml` | The daily pipeline. Schedule it **daily** in the UI. |
 | `gw-login-setup.yaml` | **Temporary** bootstrap pipeline — runs the setup from TFS. |
 | `tools/setup.py` | What that pipeline runs: pre-flight, schema, grants, verify. |
+| `tools/prepare_python.sh` | Both pipelines' first step on the Linux agent: picks Python, builds a job venv, installs pyodbc. |
+| `tools/gwcommon.py` | Config, ODBC-driver and TLS helpers shared by the collector and `setup.py`. |
 | `sql/schema.sql` | Tables and views. Idempotent. |
 | `sql/grants.sql` | Least-privilege grants (collector r/w, Grafana read-only). |
 | `sql/verify.sql` | Coverage, freshness, gaps, per-user reconciliation. |
@@ -115,8 +117,8 @@ It takes an `action`:
 
 | Action | Does | Writes? |
 |---|---|---|
-| `check` | Pre-flight: TCP to Loki and SQL, Loki labels, ODBC drivers, `@@VERSION`, `CREATE TABLE` rights, Python version | no |
-| `schema` | Applies `sql/schema.sql`, then asserts 7 objects exist | yes |
+| `check` | Pre-flight: OS, Python, ODBC drivers, TCP and TLS to Loki and SQL, Loki labels, SQL Server 2016 SP1+, rights. Reports **every** problem in one run. | no |
+| `schema` | Applies `sql/schema.sql`, then confirms all six objects (3 tables, 3 views) exist by name | yes |
 | `grants` | Applies `sql/grants.sql` — requires `grafanaLogin` | yes |
 | `verify` | Runs `sql/verify.sql`, printing every result set | no |
 | `all` | The four above, in order | yes |
@@ -135,12 +137,23 @@ thing that stays.
 
 ## Agent prerequisites
 
-- **Python 3** — located by the same PowerShell probe the report uses, because
-  `UsePythonVersion@0` only searches the tool cache and fails on self-hosted
-  agents.
-- **pyodbc** plus Microsoft's ODBC Driver 17/18. This is the one pip dependency;
-  SQL Server has no standard-library driver. If the agent has no route to PyPI,
-  vendor a wheel and install from disk.
-- **Network** — the agent must reach Loki (`:3100`) and SQL Server (`:1433`).
-  `BYPASS_PROXY=true` (the default) skips the system proxy for Loki, matching
-  the report.
+Both pipelines run on **Linux agents** (`demands: Agent.OS -equals Linux`). The
+agent needs, once, from an admin with root — exact commands in
+[`DEPLOY.md`](DEPLOY.md), phase 0:
+
+- **Python 3.9+** with the `venv` module. `UsePythonVersion@0` only searches the
+  agent's tool cache and fails on self-hosted agents, so `prepare_python.sh`
+  tries each `python3.x` on `PATH` — one that already has pyodbc first, then
+  newest first — until one can build a venv.
+- **Microsoft ODBC Driver 18** (`msodbcsql18`), which pulls in unixODBC. The
+  pipeline can't install it — it needs root and a EULA acceptance.
+- **A route to PyPI**, an internal mirror (`PIP_INDEX_URL`), or the OS
+  `python3-pyodbc` package. pyodbc goes into a job-local venv, which sidesteps
+  PEP 668 on newer Debian/Ubuntu and RHEL 8's too-old system pip.
+- **Network** to Loki (`:3100`) and SQL Server (`:1433`). `BYPASS_PROXY=true`
+  (the default) skips the system proxy for Loki, matching the report.
+- **Internal CAs** in the OS trust store, if Loki or SQL Server use one. Linux
+  Python trusts only the OpenSSL bundle, not a Windows store.
+
+Run `GW-Login-Setup` with `action=check` to see which of these are missing — it
+reports all of them in one run.
