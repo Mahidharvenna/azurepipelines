@@ -88,37 +88,53 @@ sqlcmd -S <server> -d <database> -Q "SELECT name, type_desc FROM sys.objects WHE
 
 ## Phase 2 — Variable groups
 
-Two groups, so the credential and the tuning knobs have different owners.
+Both pipelines read two groups. Neither needs creating from scratch.
 
-**`gw-logins-db`** — or point the pipeline at an existing DB group by editing
-the `- group:` line. It must supply `DBINSTANCE`, `DBNAME`, `DBUSER`, `DBPASS`
-(secret). Grant the pipeline access under **Pipeline permissions**.
+**`gw-logins-db`** — the database credential. Point it at your existing DB group
+by editing the `- group:` line in both YAMLs; it must supply `DBINSTANCE`,
+`DBNAME`, `DBUSER` and `DBPASS` (secret).
 
-**`gw-logins-config`** — nothing secret:
+**`gw-reports-secrets`** — the monthly report's group, **shared on purpose**.
+Every value the collector must agree with the report on already lives there:
 
-| Variable | Example |
+| Already in the group | Why it must be shared |
 |---|---|
-| `LOKI_URL` | `https://your-loki-host.example.com:3100` |
-| `LOKI_PROJECT` | `myproject` |
-| `LOKI_VERIFY_TLS` | `true` |
-| `BYPASS_PROXY` | `true` |
-| `LOKI_LOG_LIMIT` | `5000` |
-| `LOKI_RETENTION_DAYS` | `30` |
-| `ENVS` | `DEV1,QA7,UAT1` or `ALL` |
-| `ENVS_EXCLUDE` | blank, or e.g. `PROD1` |
-| `PRODUCTS` | `pc` |
-| `PRODUCT_JOBS` / `PRODUCT_FRAGS` | blank unless overriding |
-| `LOGIN_USER_REGEX` | same value the report uses |
-| `REPORT_TIMEZONE` / `REPORT_TZ_LABEL` | same values the report uses |
-| `STORE_USERNAMES` | `true` |
-| `LOOKBACK_DAYS` | `7` |
-| `DB_SCHEMA` | `dbo` |
-| `DB_ODBC_DRIVER` | `ODBC Driver 18 for SQL Server` |
-| `DB_TRUSTED_CONNECTION` / `DB_ENCRYPT` / `DB_TRUST_SERVER_CERT` | `false` / `true` / `false` |
+| `LOKI_URL`, `LOKI_PROJECT`, `LOKI_VERIFY_TLS`, `BYPASS_PROXY` | same Loki, same selector |
+| `ENVS`, `ENVS_EXCLUDE`, `PRODUCTS`, `PRODUCT_JOBS`, `PRODUCT_FRAGS` | same streams |
+| `LOGIN_USER_REGEX` | same usernames |
+| `REPORT_TIMEZONE`, `REPORT_TZ_LABEL` | same day boundaries |
 
-> **`REPORT_TIMEZONE` must match the report's value.** It decides where a day
-> starts. If the report buckets in Eastern and the collector in UTC, the same
-> login lands on different days and the two will never reconcile.
+A copy would work on day one and drift afterwards: tune the regex in one group
+and the dashboard silently stops reconciling with the spreadsheet. One group
+makes that impossible.
+
+> **`LOKI_PROJECT` especially.** If it is missing the code falls back to the
+> placeholder `myproject`, Loki matches nothing, and every count is a
+> successful-looking **0**. If the report works, the group already has it.
+
+**Nothing new has to be added.** Every collector-only setting has a working
+default, and an undefined `$(NAME)` is treated as unset. Add one to the group
+only to override it:
+
+| Variable | Default | Override when |
+|---|---|---|
+| `DB_TRUST_SERVER_CERT` | `false` | **Likely needed.** Driver 18 encrypts by default; an internal SQL cert the agent doesn't trust fails with an SSL error. `check` shows it. |
+| `DB_ODBC_DRIVER` | `ODBC Driver 18 for SQL Server` | The agent only has Driver 17. `check` lists what is installed. |
+| `DB_ENCRYPT` | `true` | Rarely. Prefer `DB_TRUST_SERVER_CERT`. |
+| `DB_TRUSTED_CONNECTION` | `false` | The agent's service account has DB rights (Windows auth). |
+| `DB_SCHEMA` | `dbo` | Tables live in another schema. |
+| `LOOKBACK_DAYS` | `7` | Longer self-healing window. |
+| `LOKI_RETENTION_DAYS` | `30` | Your Loki keeps more or less. |
+| `LOKI_LOG_LIMIT` | `5000` | Rarely; paging makes it a performance knob, not a correctness one. |
+| `STORE_USERNAMES` | `true` | You decide not to keep user identifiers. |
+
+The group also holds the report's SMTP secrets. Those are never mapped into
+either job's `env:` block, and ADO does not expose an unmapped secret to a
+script, so the collector never sees them.
+
+**Grant access.** Under **Library → group → Pipeline permissions**, authorize
+both `GW-Login-Setup` and `GW-Login-Collector` on **both** groups. A missing
+authorization fails the run at queue time, before any step runs.
 
 ---
 

@@ -56,8 +56,14 @@ variables:
 # Database credentials. Point this at your existing DB variable group; the env
 # block below maps its names. Needs DBINSTANCE, DBNAME, DBUSER, DBPASS.
 - group: 'gw-logins-db'
-# Loki endpoint and collection scope. Nothing secret.
-- group: 'gw-logins-config'
+# Shared with reports/gw-monthly-login-report.yaml ON PURPOSE. LOKI_PROJECT,
+# LOGIN_USER_REGEX, REPORT_TIMEZONE, ENVS and PRODUCT_JOBS must be identical in
+# both jobs or the dashboard silently stops reconciling with the spreadsheet --
+# one group makes drift impossible. Collector-only settings (LOOKBACK_DAYS,
+# DB_TRUST_SERVER_CERT, ...) all have working defaults; add them here only to
+# override. The group also holds SMTP secrets; they are never mapped into this
+# job's env, and ADO does not expose an unmapped secret to a script.
+- group: 'gw-reports-secrets'
 
 steps:
 - checkout: self
