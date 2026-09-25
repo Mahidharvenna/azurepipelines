@@ -6,9 +6,9 @@
 # is live -- the daily collector (gw-login-collector.yaml) is the thing that
 # stays.
 #
-# Uses System.Data.SqlClient via PowerShell, so the agent needs NO database
-# tooling -- no sqlcmd, no ODBC driver, no pyodbc. (The collector itself does
-# need those; the 'check' action tells you whether they're present.)
+# Python + pyodbc, same as the collector. A successful 'check' therefore also
+# proves the collector's hardest prerequisite -- pyodbc talking to SQL Server
+# through the ODBC driver -- works on this agent.
 #
 # Register: Pipelines -> New -> Existing YAML -> /logins/gw-login-setup.yaml
 #
@@ -63,28 +63,49 @@ steps:
 - checkout: self
   clean: true
 
-- task: PowerShell@2
+# UsePythonVersion@0 only searches the agent tool cache, not a normal install,
+# so it fails on self-hosted agents even when Python is present. Locate the
+# interpreter directly instead.
+- powershell: |
+    $exe = $null
+    foreach ($c in 'python', 'python3', 'py') {
+      $cmd = Get-Command $c -ErrorAction SilentlyContinue
+      if (-not $cmd) { continue }
+      $ver = (& $c --version 2>&1) -join ' '
+      if ($LASTEXITCODE -eq 0 -and $ver -match 'Python 3') {
+        $exe = $cmd.Source; Write-Host "Using $ver  ($exe)"; break
+      }
+    }
+    if (-not $exe) {
+      Write-Error "No Python 3 found on this agent. Install Python 3, tick 'Add to PATH', and restart the agent service."
+      exit 1
+    }
+    Write-Host "##vso[task.setvariable variable=PYTHON_EXE]$exe"
+  displayName: 'Locate Python 3'
+
+- script: '"$(PYTHON_EXE)" -m pip install --disable-pip-version-check pyodbc'
+  displayName: 'Install pyodbc'
+
+- script: >-
+    "$(PYTHON_EXE)" logins/tools/setup.py
+    --action ${{ parameters.action }}
+    --grafana-login "${{ parameters.grafanaLogin }}"
+    --collector-login "${{ parameters.collectorLogin }}"
+    --sql-root logins/sql
   displayName: 'Setup: ${{ parameters.action }}'
-  inputs:
-    filePath: 'logins/tools/setup.ps1'
-    arguments: >-
-      -Action ${{ parameters.action }}
-      -GrafanaLogin "${{ parameters.grafanaLogin }}"
-      -CollectorLogin "${{ parameters.collectorLogin }}"
-      -SqlRoot "logins/sql"
-    workingDirectory: '$(Build.SourcesDirectory)'
-    failOnStderr: false
-    pwsh: false          # Windows PowerShell: System.Data.SqlClient is built in
+  workingDirectory: '$(Build.SourcesDirectory)'
   env:
     # Secrets travel as environment variables, never as arguments -- the
-    # arguments line is echoed into the build log.
+    # command line is echoed into the build log.
     DB_SERVER:             $(DBINSTANCE)
     DB_NAME:               $(DBNAME)
     DB_USER:               $(DBUSER)
     DB_PASS:               $(DBPASS)
+    DB_ODBC_DRIVER:        $(DB_ODBC_DRIVER)
     DB_TRUSTED_CONNECTION: $(DB_TRUSTED_CONNECTION)
     DB_ENCRYPT:            $(DB_ENCRYPT)
     DB_TRUST_SERVER_CERT:  $(DB_TRUST_SERVER_CERT)
     LOKI_URL:              $(LOKI_URL)
+    LOKI_PROJECT:          $(LOKI_PROJECT)
     LOKI_VERIFY_TLS:       $(LOKI_VERIFY_TLS)
     BYPASS_PROXY:          $(BYPASS_PROXY)
