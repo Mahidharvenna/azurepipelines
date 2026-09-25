@@ -35,7 +35,9 @@ nobody purges.
 |---|---|
 | [`DEPLOY.md`](DEPLOY.md) | **Step-by-step deployment with the test ladder.** |
 | `collect_logins.py` | Queries Loki, upserts daily counts and per-user rows. |
-| `gw-login-collector.yaml` | The pipeline. Schedule it **daily** in the UI. |
+| `gw-login-collector.yaml` | The daily pipeline. Schedule it **daily** in the UI. |
+| `gw-login-setup.yaml` | **Temporary** bootstrap pipeline — runs the setup from TFS. |
+| `tools/setup.ps1` | What that pipeline runs: pre-flight, schema, grants, verify. |
 | `sql/schema.sql` | Tables and views. Idempotent. |
 | `sql/grants.sql` | Least-privilege grants (collector r/w, Grafana read-only). |
 | `sql/verify.sql` | Coverage, freshness, gaps, per-user reconciliation. |
@@ -101,6 +103,33 @@ late-arriving log self-heals without anyone intervening.
 reasonable, because it runs again next month. The collector pages instead: it
 resumes from the last entry until the day is exhausted. A silently short day
 here would be wrong permanently.
+
+## Setting it up without local tooling
+
+`gw-login-setup.yaml` does the database setup from the pipeline, so nobody needs
+`sqlcmd` or a SQL client on their machine. It talks to SQL Server through
+`System.Data.SqlClient`, which is built into Windows PowerShell — the agent
+needs no database tooling at all for this part.
+
+It takes an `action`:
+
+| Action | Does | Writes? |
+|---|---|---|
+| `check` | Pre-flight: TCP to Loki and SQL, Loki labels, `@@VERSION`, `CREATE TABLE` rights, Python, ODBC, pip | no |
+| `schema` | Applies `sql/schema.sql`, then asserts 7 objects exist | yes |
+| `grants` | Applies `sql/grants.sql` — requires `grafanaLogin` | yes |
+| `verify` | Runs `sql/verify.sql`, printing every result set | no |
+| `all` | The four above, in order | yes |
+
+`check` is the default so an accidental run changes nothing.
+
+Because it bypasses `sqlcmd`, the script has to do two things `sqlcmd` does for
+free: split each file on `GO` (a client-side batch separator the server rejects)
+and expand `:setvar` / `$(TOKEN)` (also client-side). That's why `grants.sql`
+keeps working unchanged whether you run it through this pipeline or `sqlcmd`.
+
+Delete this pipeline once the dashboard is live. The daily collector is the
+thing that stays.
 
 ## Agent prerequisites
 

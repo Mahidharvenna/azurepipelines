@@ -1,0 +1,90 @@
+# =============================================================================
+# TEMPORARY bootstrap pipeline for the login-history database.
+#
+# Does the one-off setup that would otherwise need sqlcmd on someone's laptop:
+# pre-flight checks, schema, grants, verification. Delete it once the dashboard
+# is live -- the daily collector (gw-login-collector.yaml) is the thing that
+# stays.
+#
+# Uses System.Data.SqlClient via PowerShell, so the agent needs NO database
+# tooling -- no sqlcmd, no ODBC driver, no pyodbc. (The collector itself does
+# need those; the 'check' action tells you whether they're present.)
+#
+# Register: Pipelines -> New -> Existing YAML -> /logins/gw-login-setup.yaml
+#
+# Run it in this order:
+#   1. check    -- touches nothing, tells you what is wrong
+#   2. schema   -- creates the tables
+#   3. grants   -- needs grafanaLogin
+#   4. verify   -- after the collector's first backfill
+# =============================================================================
+
+trigger: none
+pr: none
+
+name: 'GW-LoginSetup-$(Date:yyyyMMdd).$(Rev:r)'
+
+parameters:
+# Defaults to the read-only action on purpose: an accidental run changes nothing.
+- name: action
+  displayName: 'What to do'
+  type: string
+  default: check
+  values:
+    - check      # pre-flight only -- no writes
+    - schema     # create tables and views (idempotent)
+    - grants     # apply permissions -- needs grafanaLogin below
+    - verify     # run the checks and print every result set
+    - all        # check, schema, grants, verify
+
+- name: grafanaLogin
+  displayName: 'Grafana read-only SQL login (required for grants/all)'
+  type: string
+  default: ''
+
+- name: collectorLogin
+  displayName: 'Collector SQL login (blank = use DBUSER)'
+  type: string
+  default: ''
+
+# ADO Server 2022 RTW rejects a template expression on pool.name, so this is a
+# literal. It must be an agent that can reach both Loki and SQL Server.
+pool:
+  name: Default
+
+variables:
+# Database credentials. Point this at your existing DB variable group; the env
+# block below maps its names. Needs DBINSTANCE, DBNAME, DBUSER, DBPASS.
+- group: 'gw-logins-db'
+# Loki endpoint and collection scope. Nothing secret.
+- group: 'gw-logins-config'
+
+steps:
+- checkout: self
+  clean: true
+
+- task: PowerShell@2
+  displayName: 'Setup: ${{ parameters.action }}'
+  inputs:
+    filePath: 'logins/tools/setup.ps1'
+    arguments: >-
+      -Action ${{ parameters.action }}
+      -GrafanaLogin "${{ parameters.grafanaLogin }}"
+      -CollectorLogin "${{ parameters.collectorLogin }}"
+      -SqlRoot "logins/sql"
+    workingDirectory: '$(Build.SourcesDirectory)'
+    failOnStderr: false
+    pwsh: false          # Windows PowerShell: System.Data.SqlClient is built in
+  env:
+    # Secrets travel as environment variables, never as arguments -- the
+    # arguments line is echoed into the build log.
+    DB_SERVER:             $(DBINSTANCE)
+    DB_NAME:               $(DBNAME)
+    DB_USER:               $(DBUSER)
+    DB_PASS:               $(DBPASS)
+    DB_TRUSTED_CONNECTION: $(DB_TRUSTED_CONNECTION)
+    DB_ENCRYPT:            $(DB_ENCRYPT)
+    DB_TRUST_SERVER_CERT:  $(DB_TRUST_SERVER_CERT)
+    LOKI_URL:              $(LOKI_URL)
+    LOKI_VERIFY_TLS:       $(LOKI_VERIFY_TLS)
+    BYPASS_PROXY:          $(BYPASS_PROXY)
