@@ -549,7 +549,10 @@ def main():
                     choices=["check", "schema", "grants", "verify", "all"])
     ap.add_argument("--grafana-login", default="")
     ap.add_argument("--collector-login", default="")
-    ap.add_argument("--sql-root", default="logins/sql")
+    # Default: the sql/ folder next to this script's tools/ folder, wherever the
+    # logins folder sits in the repo.
+    ap.add_argument("--sql-root", default=os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), os.pardir, "sql"))
     args = ap.parse_args()
 
     if not DB_SERVER or not DB_NAME:

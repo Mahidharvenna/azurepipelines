@@ -45,6 +45,9 @@ nobody purges.
 | `sql/verify.sql` | Coverage, freshness, gaps, per-user reconciliation. |
 | `grafana/gw-logins-dashboard.json` | Importable dashboard, 10 panels. |
 
+The folder can sit anywhere in your repo (`logins/`, `Grafana/logins/`, ...); each
+pipeline's first step locates it. Paths in these docs are relative to the folder.
+
 ## Tables
 
 `gw_login_daily` — one row per `(day, env, product)` with `logins` and

@@ -9,6 +9,10 @@ Everything is additive — rollback is at the bottom and takes two minutes.
 The order matters: the setup pipeline needs the variable groups, and the
 collector needs the tables.
 
+The folder can live anywhere in your repo — `logins/` at the root, or deeper
+such as `Grafana/logins/`. Each pipeline's first step finds it and checks every
+file it needs is committed.
+
 | Phase | What | Who |
 |---|---|---|
 | 0 | Agent prerequisites | an admin with root, once |
@@ -213,8 +217,9 @@ authorization fails the run at queue time, before any step runs.
 
 ## Phase 2 — Database setup, from TFS
 
-**Pipelines → New → Existing YAML → `/logins/gw-login-setup.yaml`** → name it
-`GW-Login-Setup` → **Save**.
+**Pipelines → New → Existing YAML → `<folder>/gw-login-setup.yaml`** (e.g.
+`/Grafana/logins/gw-login-setup.yaml`) → **Save**, then **⋯ → Rename** it to
+`GW-Login-Setup` — otherwise ADO names it after the repo, e.g. `<repo> (1)`.
 
 Run it three times, changing only the `action`:
 
@@ -262,8 +267,8 @@ a table in `dbo` doesn't make you its owner, so `db_ddladmin` alone isn't enough
 
 ## Phase 3 — Register and schedule the collector
 
-**Pipelines → New → Existing YAML → `/logins/gw-login-collector.yaml`** → name it
-`GW-Login-Collector` → **Save**, don't run.
+**Pipelines → New → Existing YAML → `<folder>/gw-login-collector.yaml`** →
+**Save**, don't run → **⋯ → Rename** to `GW-Login-Collector`.
 
 Then **Edit → ⋯ → Triggers → Scheduled**:
 
@@ -403,6 +408,10 @@ exists; two prove the *only if source changed* box is unticked.
 
 | You see | Cause | Fix |
 |---|---|---|
+| `logins/tools/prepare_python.sh: No such file or directory` | an older YAML that assumed `logins/` at the repo root | pull the current YAMLs — they find the folder themselves |
+| `No tools/prepare_python.sh anywhere in this repo` | the folder was copied in but new files never `git add`-ed | `git add <folder>`, commit, push |
+| `Missing from the checked-out repo: …` | same, for the files named | same |
+| `Found N copies of tools/prepare_python.sh` | the folder exists twice | delete the stale copy, or set a pipeline variable `LOGINS_DIR` to the one to use |
 | `Unable to locate executable file: 'pwsh'` | a PowerShell step ran on a Linux agent | the `logins/` YAMLs are bash-only now — pull them. The monthly report's YAML still has a PowerShell step and fails the same way on a Linux agent |
 | `No agent found in pool Default which satisfies the specified demands` | no online Linux agent | bring one online, or check the agent's `Agent.OS` capability |
 | `No Python >= 3.9 found` | Python missing or too old, or outside the agent's `.path` | 0.2 / 0.3, then 0.6 |

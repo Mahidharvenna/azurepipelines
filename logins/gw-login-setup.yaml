@@ -77,14 +77,53 @@ steps:
 - checkout: self
   clean: true
 
+# Find this folder in the repo instead of assuming where it lives: 'logins/'
+# at the root of the GitHub repo, but it can sit deeper (e.g. Grafana/logins).
+# Anchored on tools/prepare_python.sh, which an older copy of the folder lacks,
+# so a stale duplicate elsewhere in the repo is never picked. To pin the folder
+# explicitly, define a pipeline variable LOGINS_DIR.
+- script: |
+    dir="$LOGINS_DIR_PINNED"
+    case "$dir" in '$'*) dir="" ;; esac     # an undefined variable arrives as a literal
+    if [ -z "$dir" ]; then
+      hits=`git ls-files -- '*tools/prepare_python.sh'`
+      n=`printf '%s\n' "$hits" | grep -c .`
+      if [ "$n" -eq 0 ]; then
+        echo "##vso[task.logissue type=error]No tools/prepare_python.sh anywhere in this repo. Commit the whole logins folder -- git only picks up new files when you git add them."
+        exit 1
+      fi
+      if [ "$n" -gt 1 ]; then
+        echo "##vso[task.logissue type=error]Found $n copies of tools/prepare_python.sh: `echo $hits`. Delete the stale ones, or set a pipeline variable LOGINS_DIR to the folder to use."
+        exit 1
+      fi
+      dir=`dirname "$hits"`
+      dir=`dirname "$dir"`
+    fi
+    missing=""
+    for f in collect_logins.py tools/prepare_python.sh tools/setup.py tools/gwcommon.py \
+             sql/schema.sql sql/grants.sql sql/verify.sql; do
+      [ -f "$dir/$f" ] || missing="$missing $dir/$f"
+    done
+    if [ -n "$missing" ]; then
+      echo "##vso[task.logissue type=error]Missing from the checked-out repo:$missing -- commit them (new files need git add)."
+      exit 1
+    fi
+    echo "logins folder  : $dir"
+    echo "##vso[task.setvariable variable=LOGINS_DIR]$dir"
+  displayName: 'Locate logins folder'
+  workingDirectory: '$(Build.SourcesDirectory)'
+  env:
+    LOGINS_DIR_PINNED: $(LOGINS_DIR)
+
 # UsePythonVersion@0 only searches the agent tool cache, so it fails on
 # self-hosted agents even with Python installed. prepare_python.sh picks the
 # newest python3 >= 3.9 on PATH, builds a job-local venv (avoids PEP 668 and
 # old system pip), installs pyodbc into it, prints what the agent has, and sets
 # $(PYTHON_EXE). It is a file rather than inline so ADO cannot macro-expand the
 # $(...) inside it.
-- script: bash logins/tools/prepare_python.sh "$(Agent.TempDirectory)"
+- script: bash "$(LOGINS_DIR)/tools/prepare_python.sh" "$(Agent.TempDirectory)"
   displayName: 'Prepare Python'
+  workingDirectory: '$(Build.SourcesDirectory)'
   env:
     # Only needed when the agent can't reach PyPI (DEPLOY.md 0.4). Mapped
     # explicitly so a feed URL holding a credential can be a secret variable --
@@ -95,11 +134,11 @@ steps:
     HTTPS_PROXY:         $(HTTPS_PROXY)
 
 - script: >-
-    "$(PYTHON_EXE)" logins/tools/setup.py
+    "$(PYTHON_EXE)" "$(LOGINS_DIR)/tools/setup.py"
     --action ${{ parameters.action }}
     --grafana-login "${{ parameters.grafanaLogin }}"
     --collector-login "${{ parameters.collectorLogin }}"
-    --sql-root logins/sql
+    --sql-root "$(LOGINS_DIR)/sql"
   displayName: 'Setup: ${{ parameters.action }}'
   workingDirectory: '$(Build.SourcesDirectory)'
   env:
