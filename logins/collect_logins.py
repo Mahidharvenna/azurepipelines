@@ -11,7 +11,8 @@ Shares its conventions with reports/monthly_report.py -- same env() handling,
 same selector, same timezone treatment, same LOGIN_USER_REGEX -- so the stored
 numbers reconcile with the emailed report.
 
-Standard library only, except pyodbc for the database.
+Standard library only, except pymssql for the database (its wheel carries its
+own SQL Server client -- no ODBC driver needed).
 
 Modes
 -----
@@ -34,26 +35,26 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
-from gwcommon import (env, env_bool, harden_stdio, explain_import_error, choose_driver,
+from gwcommon import (env, env_bool, harden_stdio, explain_import_error, parse_server,
                       explain_connect_error, loki_ssl_context, is_cert_error, LOKI_CERT_HINT,
-                      connection_string, apply_session_options, missing_driver_libraries)
+                      connect_sql, apply_session_options, tds_probe)
 
 harden_stdio()
 
-# pyodbc is imported only when the database is actually used, so a dry run
-# needs no ODBC stack, and a missing unixODBC is reported as exactly that.
-pyodbc = None
+# pymssql is imported only when the database is actually used, so a dry run
+# needs nothing but the standard library.
+_sql = None
 
 
-def get_pyodbc():
-    global pyodbc
-    if pyodbc is None:
+def get_sql():
+    global _sql
+    if _sql is None:
         try:
-            import pyodbc as _pyodbc
+            import pymssql
         except ImportError as ex:
             raise SystemExit(explain_import_error(ex))
-        pyodbc = _pyodbc
-    return pyodbc
+        _sql = pymssql
+    return _sql
 
 
 # --------------------------------------------------------------------------
@@ -112,11 +113,9 @@ DB_SERVER = env("DB_SERVER")
 DB_NAME = env("DB_NAME")
 DB_USER = env("DB_USER")
 DB_PASS = env("DB_PASS")
-DB_DRIVER = env("DB_ODBC_DRIVER")               # blank = newest installed
 DB_SCHEMA = env("DB_SCHEMA", "dbo")
 DB_TRUSTED = env_bool("DB_TRUSTED_CONNECTION", False)
 DB_ENCRYPT = env_bool("DB_ENCRYPT", True)
-DB_TRUST_CERT = env_bool("DB_TRUST_SERVER_CERT", False)
 DB_TIMEOUT = int(env("DB_TIMEOUT", "30"))
 
 # Schema/table names cannot be bound as parameters, so they are interpolated --
@@ -384,38 +383,41 @@ def target_days():
 # sql server
 # --------------------------------------------------------------------------
 def connect():
-    p = get_pyodbc()
-    listed = p.drivers()
-    driver, problem = choose_driver(listed, DB_DRIVER, missing_driver_libraries(listed))
-    if problem:
-        raise SystemExit(problem)
+    p = get_sql()
     if not DB_TRUSTED and not DB_USER:
         raise SystemExit("Set DB_USER/DB_PASS, or DB_TRUSTED_CONNECTION=true.")
-    cs = connection_string(driver, DB_SERVER, DB_NAME, DB_USER, DB_PASS, DB_TRUSTED,
-                           DB_ENCRYPT, DB_TRUST_CERT, app="GW-Login-Collector")
+    host, port, _instance = parse_server(DB_SERVER)
+    # pymssql hangs indefinitely when a server accepts the connection and then
+    # says nothing; find that out with a timeout instead of hanging the job.
+    if port and tds_probe(host, port) == "silent":
+        raise SystemExit("%s:%d accepted the connection but never answered SQL Server's "
+                         "handshake -- a firewall or proxy is swallowing the traffic. Not "
+                         "connecting: it would hang." % (host, port))
     try:
-        cn = p.connect(cs, timeout=DB_TIMEOUT)
+        cn = connect_sql(p, DB_SERVER, DB_NAME, DB_USER, DB_PASS, DB_TRUSTED, DB_ENCRYPT,
+                         timeout=300, appname="GW-Login-Collector", autocommit=False)
     except p.Error as ex:
         raise SystemExit(explain_connect_error(ex, DB_SERVER, DB_NAME))
-    cn.autocommit = False
     apply_session_options(cn)
-    log("ODBC driver      : %s" % driver)
+    log("SQL client       : pymssql %s, %s" % (
+        getattr(p, "__version__", "?"),
+        "encrypted (certificate not verified)" if DB_ENCRYPT else "unencrypted"))
     return cn
 
 
-# The `? = 1 OR s.logins > 0` guard means a zero never overwrites an existing
+# The `%s = 1 OR s.logins > 0` guard means a zero never overwrites an existing
 # non-zero count. A zero almost always means something upstream broke -- Loki
 # down, a renamed label, logs outside retention -- and unlike Loki this table
 # has no other copy. The first write for a day still records a legitimate 0.
 UPSERT_DAILY = """
 MERGE {schema}.gw_login_daily WITH (HOLDLOCK) AS t
-USING (SELECT CAST(? AS DATE)        AS [day],
-              CAST(? AS VARCHAR(32)) AS env,
-              CAST(? AS VARCHAR(8))  AS product,
-              CAST(? AS BIGINT)      AS logins,
-              CAST(? AS INT)         AS distinct_users) AS s
+USING (SELECT CAST(%s AS DATE)        AS [day],
+              CAST(%s AS VARCHAR(32)) AS env,
+              CAST(%s AS VARCHAR(8))  AS product,
+              CAST(%s AS BIGINT)      AS logins,
+              CAST(%s AS INT)         AS distinct_users) AS s
     ON  t.[day] = s.[day] AND t.env = s.env AND t.product = s.product
-WHEN MATCHED AND (? = 1 OR s.logins > 0) THEN
+WHEN MATCHED AND (%s = 1 OR s.logins > 0) THEN
     UPDATE SET logins = s.logins, distinct_users = s.distinct_users,
                collected_at = SYSUTCDATETIME()
 WHEN NOT MATCHED THEN
@@ -425,11 +427,11 @@ WHEN NOT MATCHED THEN
 
 UPSERT_USER = """
 MERGE {schema}.gw_login_user_daily WITH (HOLDLOCK) AS t
-USING (SELECT CAST(? AS DATE)         AS [day],
-              CAST(? AS VARCHAR(32))  AS env,
-              CAST(? AS VARCHAR(8))   AS product,
-              CAST(? AS NVARCHAR(128)) AS username,
-              CAST(? AS INT)          AS logins) AS s
+USING (SELECT CAST(%s AS DATE)         AS [day],
+              CAST(%s AS VARCHAR(32))  AS env,
+              CAST(%s AS VARCHAR(8))   AS product,
+              CAST(%s AS NVARCHAR(128)) AS username,
+              CAST(%s AS INT)          AS logins) AS s
     ON  t.[day] = s.[day] AND t.env = s.env
     AND t.product = s.product AND t.username = s.username
 WHEN MATCHED THEN
@@ -442,7 +444,7 @@ WHEN NOT MATCHED THEN
 # A user who stops appearing on a re-collected day must not linger.
 DELETE_STALE_USERS = """
 DELETE FROM {schema}.gw_login_user_daily
-WHERE [day] = ? AND env = ? AND product = ?
+WHERE [day] = %s AND env = %s AND product = %s
 """
 
 
@@ -480,10 +482,10 @@ def main():
     if cn:
         cur = cn.cursor()
         cur.execute(
-            "INSERT INTO %s.gw_login_collector_run "
+            "INSERT INTO {schema}.gw_login_collector_run "
             "(started_at, status, days_from, days_to, build_id) "
-            "OUTPUT INSERTED.run_id VALUES (?, 'running', ?, ?, ?)" % DB_SCHEMA,
-            started, days[0], days[-1], BUILD_ID)
+            "OUTPUT INSERTED.run_id VALUES (%s, 'running', %s, %s, %s)".format(schema=DB_SCHEMA),
+            (started, days[0], days[-1], BUILD_ID))
         run_id = cur.fetchone()[0]
         cn.commit()
         log("run_id           : %s" % run_id)
@@ -515,16 +517,16 @@ def main():
 
                 if cn:
                     cur = cn.cursor()
-                    cur.execute(UPSERT_DAILY.format(schema=DB_SCHEMA), day, env_label,
-                                product, logins, distinct,
-                                1 if ALLOW_ZERO_OVERWRITE else 0)
+                    cur.execute(UPSERT_DAILY.format(schema=DB_SCHEMA),
+                                (day, env_label, product, logins, distinct,
+                                 1 if ALLOW_ZERO_OVERWRITE else 0))
                     written += max(cur.rowcount, 0)    # -1 = 'unknown' on some drivers
                     if STORE_USERNAMES and (logins > 0 or ALLOW_ZERO_OVERWRITE):
                         cur.execute(DELETE_STALE_USERS.format(schema=DB_SCHEMA),
-                                    day, env_label, product)
+                                    (day, env_label, product))
                         for user, n in per_user.items():
                             cur.execute(UPSERT_USER.format(schema=DB_SCHEMA),
-                                        day, env_label, product, user[:128], n)
+                                        (day, env_label, product, user[:128], n))
 
                 log("  %s  %-8s %-3s %8d logins  %5d distinct" % (
                     day, env_label, product.upper(), logins, distinct))
@@ -537,10 +539,11 @@ def main():
     if cn:
         cur = cn.cursor()
         cur.execute(
-            "UPDATE %s.gw_login_collector_run SET finished_at = ?, status = ?, "
-            "rows_written = ?, query_errors = ?, detail = ? WHERE run_id = ?" % DB_SCHEMA,
-            datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None),
-            status, written, errors, detail, run_id)
+            "UPDATE {schema}.gw_login_collector_run SET finished_at = %s, status = %s, "
+            "rows_written = %s, query_errors = %s, detail = %s "
+            "WHERE run_id = %s".format(schema=DB_SCHEMA),
+            (datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None),
+             status, written, errors, detail, run_id))
         cn.commit()
         cn.close()
 

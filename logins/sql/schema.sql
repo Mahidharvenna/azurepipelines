@@ -12,7 +12,8 @@ SET NOCOUNT ON;
 
 -- Required for the indexes on the computed day_ts columns below. They must be
 -- set in an EARLIER batch than the CREATE INDEX: QUOTED_IDENTIFIER is applied at
--- parse time. ODBC clients (pyodbc, Grafana) default to these already; sqlcmd
+-- parse time. The pipelines also set them on every connection, and Grafana's
+-- driver defaults to them; sqlcmd
 -- does NOT -- it defaults QUOTED_IDENTIFIER OFF, which makes CREATE INDEX fail
 -- with Msg 1934 while the table is still created, so a re-run skips it and the
 -- index is never built.

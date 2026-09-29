@@ -5,13 +5,13 @@
 #   2. find every python >= 3.9 on PATH
 #   3. build a job-local venv with the first one that can: avoids PEP 668
 #      ('externally-managed-environment' on Debian 12+/Ubuntu 23.04+) and old
-#      system pip that can't install pyodbc's wheels (RHEL 8's pip 9)
-#   4. make pyodbc importable in it
+#      system pip that can't install modern wheels (RHEL 8's pip 9)
+#   4. install pymssql into it -- its wheel carries its own SQL Server client,
+#      so no ODBC driver or admin install is needed
 #   5. hand the venv's interpreter to later steps as $(PYTHON_EXE)
 #
-# Fails only when no Python can build a venv. pyodbc problems are warnings, so
-# the next step still runs and reports everything in one go -- setup.py 'check'
-# diagnoses a missing ODBC stack precisely.
+# Fails only when no Python can build a venv. An install problem is a warning,
+# so the next step still runs and reports everything else in one go.
 #
 # Usage: prepare_python.sh <work-dir>     (the pipeline passes $(Agent.TempDirectory))
 
@@ -53,30 +53,10 @@ echo "=================== agent ==================="
 echo "OS             : $(os_field PRETTY_NAME || true) ($(uname -s) $(uname -m))"
 echo "user           : $(id -un 2>/dev/null || echo '?')"
 echo "PATH           : $PATH"
-if command -v odbcinst >/dev/null 2>&1; then
-  drivers="$(odbcinst -q -d 2>/dev/null | tr -d '[]' | paste -sd ',' -)"
-  echo "ODBC drivers   : ${drivers:-none registered}"
-else
-  echo "ODBC drivers   : odbcinst not found -- unixODBC is not installed"
-fi
-LDCONFIG="$(command -v ldconfig 2>/dev/null || echo /sbin/ldconfig)"
-if [ -x "$LDCONFIG" ]; then
-  # Captured first: 'ldconfig -p | grep -q' under pipefail reports a false
-  # MISSING, because grep exits early and ldconfig dies of SIGPIPE.
-  libs="$("$LDCONFIG" -p 2>/dev/null)"
-  case "$libs" in
-    *libodbc.so.2*) echo "libodbc.so.2   : present" ;;
-    *)              echo "libodbc.so.2   : MISSING" ;;
-  esac
-fi
 [ -n "${PIP_INDEX_URL:-}" ] && echo "pip index      : PIP_INDEX_URL is set"
 
-# ---- 1. interpreters >= 3.9 -------------------------------------------------
-# Order: any that already imports pyodbc first -- an admin-installed OS package
-# (RHEL 9's python3-pyodbc) exists only for that distro's own python3 -- then
-# newest first.
-WITH_PYODBC=""
-OTHERS=""
+# ---- 1. interpreters >= 3.9, newest first -----------------------------------
+CANDIDATES=""
 SEEN=""
 for c in python3.13 python3.12 python3.11 python3.10 python3.9 python3 python; do
   p="$(command -v "$c" 2>/dev/null)" || continue
@@ -88,15 +68,9 @@ for c in python3.13 python3.12 python3.11 python3.10 python3.9 python3 python; d
     echo "python         : $c -> $p ($v) -- too old"
     continue
   fi
-  if "$p" -c 'import pyodbc' >/dev/null 2>&1; then
-    echo "python         : $c -> $p ($v) -- already has pyodbc"
-    WITH_PYODBC="$WITH_PYODBC $p"
-  else
-    echo "python         : $c -> $p ($v)"
-    OTHERS="$OTHERS $p"
-  fi
+  echo "python         : $c -> $p ($v)"
+  CANDIDATES="$CANDIDATES $p"
 done
-CANDIDATES="$WITH_PYODBC $OTHERS"
 echo "=============================================="
 
 if [ -z "${CANDIDATES// /}" ]; then
@@ -112,14 +86,12 @@ if [ -z "${CANDIDATES// /}" ]; then
 fi
 
 # ---- 2. job-local venv: first interpreter that can build one ---------------
-# --system-site-packages: an admin-installed OS package (python3-pyodbc) is
-# picked up as-is, so agents with no route to PyPI still work. Trying each in
-# turn means a newer python3.X without its venv package can't block a working
-# python3.
+# Trying each in turn means a newer python3.X without its venv package can't
+# block a working python3.
 VPY=""
 for PY in $CANDIDATES; do
   rm -rf "$VENV"
-  if "$PY" -m venv --system-site-packages "$VENV" >"$WORK/gwpy-venv.log" 2>&1; then
+  if "$PY" -m venv "$VENV" >"$WORK/gwpy-venv.log" 2>&1; then
     VPY="$VENV/bin/python"
     echo "Using $("$PY" --version 2>&1) ($PY)"
     break
@@ -135,47 +107,29 @@ if [ -z "$VPY" ]; then
   fail "None of the Python interpreters above could create a virtualenv. Admin fix: $hint"
 fi
 
-# ---- 3. pyodbc -------------------------------------------------------------
-import_pyodbc() {
-  "$VPY" -c 'import pyodbc; print("pyodbc %s  (%s)" % (pyodbc.version, pyodbc.__file__))' 2>"$WORK/gwpy-import.err"
-}
-pyodbc_present() {
-  "$VPY" -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("pyodbc") else 1)' 2>/dev/null
-}
-explain_import() {
-  err="$(tail -n 1 "$WORK/gwpy-import.err" 2>/dev/null)"
-  case "$err" in
-    *libodbc*) warn "pyodbc is installed but cannot load unixODBC ($err). An admin must install Microsoft's ODBC Driver 18 (msodbcsql18), which pulls in unixODBC -- see DEPLOY.md, phase 0." ;;
-    *)         warn "pyodbc is installed but failed to import: ${err:-unknown error}" ;;
-  esac
-}
+# ---- 3. pymssql ------------------------------------------------------------
+# Pinned: the Linux wheel bundles FreeTDS, OpenSSL and Kerberos, so this one
+# package is the entire SQL Server client. 2.3.13 rather than the newest 2.4.x,
+# which is weeks old.
+PYMSSQL="pymssql==2.3.13"
 PIP_OPTS="--disable-pip-version-check --retries 2 --timeout 30"
+import_pymssql() {
+  "$VPY" -c 'import pymssql; print("pymssql %s  (%s)" % (pymssql.__version__, pymssql.__file__))' 2>"$WORK/gwpy-import.err"
+}
 
-if import_pyodbc; then
-  :
-elif pyodbc_present; then
-  explain_import
+echo "Installing $PYMSSQL into $VENV ..."
+# A current pip first: an old one can't read manylinux_2_28 wheels.
+"$VPY" -m pip install $PIP_OPTS --upgrade pip >"$WORK/gwpy-pip.log" 2>&1 || true
+if "$VPY" -m pip install $PIP_OPTS --only-binary=:all: "$PYMSSQL" >>"$WORK/gwpy-pip.log" 2>&1; then
+  import_pymssql || warn "pymssql installed but failed to import: $(tail -n 1 "$WORK/gwpy-import.err")"
 else
-  echo "Installing pyodbc into $VENV ..."
-  # A current pip first: an old one can't read pyodbc's manylinux wheels and
-  # tries to compile it, which needs gcc and unixODBC headers.
-  "$VPY" -m pip install $PIP_OPTS --upgrade pip >"$WORK/gwpy-pip.log" 2>&1 || true
-  if "$VPY" -m pip install $PIP_OPTS --only-binary=:all: pyodbc >>"$WORK/gwpy-pip.log" 2>&1; then
-    import_pyodbc || explain_import
-  else
-    tail -n 15 "$WORK/gwpy-pip.log"
-    case "$FAMILY:$OS_VER" in
-      debian:*) os_pkg=" or have an admin install the OS package: apt-get install python3-pyodbc" ;;
-      rhel:9*)  os_pkg=" or have an admin install the OS package: dnf install python3-pyodbc" ;;
-      *)        os_pkg="" ;;
-    esac
-    warn "pip could not install pyodbc (above). No route to PyPI? Set PIP_INDEX_URL (an internal PyPI mirror; may be a secret) or HTTPS_PROXY in the variable group$os_pkg."
-  fi
+  tail -n 15 "$WORK/gwpy-pip.log"
+  warn "pip could not install $PYMSSQL (above). No route to PyPI? Set PIP_INDEX_URL (an internal PyPI mirror; may be a secret) or HTTPS_PROXY in the variable group."
 fi
 
 echo "##vso[task.setvariable variable=PYTHON_EXE]$VPY"
 echo "PYTHON_EXE     : $VPY"
 if [ "$ISSUES" = 1 ]; then
-  echo "##vso[task.complete result=SucceededWithIssues;]Python is ready but pyodbc is not usable yet -- see the warnings."
+  echo "##vso[task.complete result=SucceededWithIssues;]Python is ready but pymssql is not usable yet -- see the warnings."
 fi
 exit 0

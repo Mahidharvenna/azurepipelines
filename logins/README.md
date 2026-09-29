@@ -38,8 +38,8 @@ nobody purges.
 | `gw-login-collector.yaml` | The daily pipeline. Schedule it **daily** in the UI. |
 | `gw-login-setup.yaml` | **Temporary** bootstrap pipeline — runs the setup from TFS. |
 | `tools/setup.py` | What that pipeline runs: pre-flight, schema, grants, verify. |
-| `tools/prepare_python.sh` | Both pipelines' first step on the Linux agent: picks Python, builds a job venv, installs pyodbc. |
-| `tools/gwcommon.py` | Config, ODBC-driver and TLS helpers shared by the collector and `setup.py`. |
+| `tools/prepare_python.sh` | Both pipelines' Python step on the Linux agent: picks Python, builds a job venv, installs `pymssql`. |
+| `tools/gwcommon.py` | Config, SQL Server connection and TLS helpers shared by the collector and `setup.py`. |
 | `sql/schema.sql` | Tables and views. Idempotent. |
 | `sql/grants.sql` | Least-privilege grants (collector r/w, Grafana read-only). |
 | `sql/verify.sql` | Coverage, freshness, gaps, per-user reconciliation. |
@@ -112,15 +112,15 @@ here would be wrong permanently.
 ## Setting it up without local tooling
 
 `gw-login-setup.yaml` does the database setup from the pipeline, so nobody needs
-`sqlcmd` or a SQL client on their machine. It's Python + pyodbc, same as the
-collector — so a successful `check` also proves the collector's hardest
-prerequisite works on that agent.
+`sqlcmd` or a SQL client on their machine. It's Python + `pymssql`, same as the
+collector — so a successful `check` also proves the collector can reach and
+write to SQL Server from that agent.
 
 It takes an `action`:
 
 | Action | Does | Writes? |
 |---|---|---|
-| `check` | Pre-flight: OS, Python, ODBC drivers, TCP and TLS to Loki and SQL, Loki labels, SQL Server 2016 SP1+, rights. Reports **every** problem in one run. | no |
+| `check` | Pre-flight: OS, Python, `pymssql`, TCP to Loki and SQL, the SQL Server handshake, Loki labels and TLS, SQL Server 2016 SP1+, rights. Reports **every** problem in one run. | no |
 | `schema` | Applies `sql/schema.sql`, then confirms all six objects (3 tables, 3 views) exist by name | yes |
 | `grants` | Applies `sql/grants.sql` — requires `grafanaLogin` | yes |
 | `verify` | Runs `sql/verify.sql`, printing every result set | no |
@@ -130,7 +130,7 @@ It takes an `action`:
 
 Because it bypasses `sqlcmd`, the script has to do three things `sqlcmd` does
 client-side and the server knows nothing about: split each file on `GO`, expand
-`:setvar` / `$(TOKEN)`, and recover `PRINT` output — pyodbc doesn't expose it, so
+`:setvar` / `$(TOKEN)`, and recover `PRINT` output — the client doesn't expose it, so
 the `PRINT` lines are lifted out and used to label the result set that follows.
 That's why the `.sql` files work unchanged through either this pipeline or
 `sqlcmd`.
@@ -141,24 +141,23 @@ thing that stays.
 ## Agent prerequisites
 
 Both pipelines run in the `DevopsAutomation` pool on **Linux agents** (`demands: Agent.OS -equals Linux`). The
-agent needs, once, from an admin with root — exact commands in
+agent needs the following — usually already there; details in
 [`DEPLOY.md`](DEPLOY.md), phase 0:
 
 - **Python 3.9+** with the `venv` module. `UsePythonVersion@0` only searches the
   agent's tool cache and fails on self-hosted agents, so `prepare_python.sh`
-  tries each `python3.x` on `PATH` — one that already has pyodbc first, then
-  newest first — until one can build a venv.
-- **An ODBC driver for SQL Server** — Microsoft's `msodbcsql18` (preferred), or
-  **FreeTDS**, which many Linux agents already have. The code picks Microsoft's
-  when present, else FreeTDS, and speaks each one's connection-string dialect.
-  The pipeline can't install either — that needs root.
-- **A route to PyPI**, an internal mirror (`PIP_INDEX_URL`), or the OS
-  `python3-pyodbc` package. pyodbc goes into a job-local venv, which sidesteps
-  PEP 668 on newer Debian/Ubuntu and RHEL 8's too-old system pip.
+  tries each `python3.x` on `PATH`, newest first, until one can build a venv.
+- **A route to PyPI**, or an internal mirror (`PIP_INDEX_URL`), to install
+  `pymssql` into that job-local venv — which also sidesteps PEP 668 on newer
+  Debian/Ubuntu and RHEL 8's too-old system pip.
+- **No SQL Server driver.** `pymssql`'s Linux wheel carries its own SQL Server
+  client (FreeTDS compiled in, plus OpenSSL and Kerberos), the way .NET's
+  `System.Data.SqlClient` does for PowerShell tasks — nothing needs root.
 - **Network** to Loki (`:3100`) and SQL Server (`:1433`). `BYPASS_PROXY=true`
   (the default) skips the system proxy for Loki, matching the report.
-- **Internal CAs** in the OS trust store, if Loki or SQL Server use one. Linux
-  Python trusts only the OpenSSL bundle, not a Windows store.
+- **Loki on an internal CA?** Linux Python trusts only the OpenSSL bundle, not
+  a Windows store: add the CA to the OS store, or set `LOKI_CA_BUNDLE`. SQL
+  Server's certificate is not verified, so it needs nothing.
 
 Run `GW-Login-Setup` with `action=check` to see which of these are missing — it
 reports all of them in one run.

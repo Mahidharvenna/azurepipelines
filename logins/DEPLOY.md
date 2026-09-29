@@ -27,97 +27,55 @@ file it needs is committed.
 
 ---
 
-## Phase 0 — The Linux agent *(one-time, needs root)*
+## Phase 0 — The Linux agent *(usually nothing to do)*
 
 ### 0.1 What the agent needs
 
 | Needs | Why | Without it |
 |---|---|---|
-| Python **3.9+** | pyodbc wheels, `zoneinfo` | `Prepare Python` fails: *No Python >= 3.9 found* |
-| Python's `venv` module | job-local installs; system pip is blocked by PEP 668 on newer Debian/Ubuntu and too old on RHEL 8 | `Prepare Python` fails: *Could not create a virtualenv* |
-| An ODBC driver for SQL Server: **Microsoft's `msodbcsql18`** (preferred) **or FreeTDS** | talks to SQL Server; either brings unixODBC (`libodbc.so.2`) | `check` fails: *No ODBC driver for SQL Server* |
-| Route to PyPI, **or** an internal mirror | installs pyodbc into the job venv | `Prepare Python` warns; `check` fails. See 0.4 |
-| Internal CA in the OS trust store | only if Loki or SQL Server use an internal CA | `check` fails with a certificate error |
+| Python **3.9+** with its `venv` module | runs the scripts; job-local installs (system pip is blocked by PEP 668 on newer Debian/Ubuntu and too old on RHEL 8) | `Prepare Python` fails and names the fix |
+| A route to PyPI, **or** an internal mirror | installs `pymssql` into the job's venv each run | `Prepare Python` warns; `check` fails. See 0.3 |
+| Network to Loki and SQL Server | the job itself | `check` names which one |
 
-**FreeTDS in the driver list? Don't trust the list alone.** RHEL's unixODBC
-package installs an *example* `/etc/odbcinst.ini` that registers PostgreSQL,
-MySQL, MySQL-5, FreeTDS and MariaDB without installing any of them — so a list
-of exactly those five usually means **no** SQL Server driver at all. `check`
-looks for each driver's library on disk and says which are real. If FreeTDS
-genuinely is installed, the pipelines use it automatically, and switch to
-Microsoft's driver by themselves once that appears.
+**No SQL Server driver is needed.** `pymssql`'s Linux wheel carries its own
+SQL Server client — FreeTDS compiled in, plus OpenSSL and Kerberos — the same
+way .NET's `System.Data.SqlClient` does for PowerShell tasks. `pip install` is
+the whole install; nothing needs root.
 
-Otherwise the driver is the one piece of admin work this design can't avoid:
-it needs root, and Microsoft's needs a EULA acceptance.
+Run `GW-Login-Setup` with `action=check` (phase 2) to confirm: it reports
+everything missing in one run.
 
-### 0.2 Install — RHEL / Rocky / Alma 8 or 9
+### 0.2 Only if Python 3.9+ is missing *(needs root)*
 
 ```bash
+# RHEL / Rocky / Alma 8 or 9 -- RHEL 8's default python3 is 3.6, too old
 sudo dnf install -y python3.11
-curl -fsSL "https://packages.microsoft.com/config/rhel/$(rpm -E %rhel)/prod.repo" \
-  | sudo tee /etc/yum.repos.d/mssql-release.repo
-sudo ACCEPT_EULA=Y dnf install -y msodbcsql18
+# Ubuntu / Debian
+sudo apt-get update && sudo apt-get install -y python3 python3-venv
 ```
 
-(The alternative, FreeTDS, is `freetds-libs` from EPEL — it fills in the example
-`[FreeTDS]` entry. Microsoft's driver is preferred: it's the vendor's, and its
-errors say what went wrong.)
+**Ubuntu 20.04:** its `python3` is 3.8. Install `python3.9 python3.9-venv`
+instead; `Prepare Python` picks the newest version on `PATH`. Debian 10 and
+older have no 3.9 package and are past end of life.
 
-`venv` ships with Python on RHEL. RHEL 8's default `python3` is 3.6 — too old —
-which is why this installs `python3.11` alongside it; `Prepare Python` picks the
-newest version on `PATH`.
+### 0.3 No route to PyPI?
 
-If `unixODBC-utf16` is installed it conflicts with `msodbcsql18`; remove it first.
-
-### 0.3 Install — Ubuntu / Debian
-
-```bash
-sudo apt-get update && sudo apt-get install -y python3 python3-venv curl
-curl -fsSL -o /tmp/packages-microsoft-prod.deb \
-  "https://packages.microsoft.com/config/$(. /etc/os-release && echo "$ID/$VERSION_ID")/packages-microsoft-prod.deb"
-sudo dpkg -i /tmp/packages-microsoft-prod.deb && sudo apt-get update
-sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
-```
-
-`ACCEPT_EULA` goes **after** `sudo` — `sudo` resets the environment, so
-`ACCEPT_EULA=Y sudo …` silently doesn't pass it through.
-
-**Ubuntu 20.04:** its `python3` is 3.8 — too old. Install
-`python3.9 python3.9-venv` as well; `Prepare Python` picks it up. Debian 10 and
-older have no 3.9 package and are past end of life; upgrade the agent's OS.
-
-**Check**, on either distro — it should list `ODBC Driver 18 for SQL Server`
-(or `FreeTDS`):
-
-```bash
-odbcinst -q -d
-```
-
-### 0.4 No route to PyPI?
-
-The job installs pyodbc into a fresh venv each run. If the agent can't reach
-PyPI, pick one:
+The job installs `pymssql` into a fresh venv each run. If the agent can't reach
+PyPI:
 
 - add **`PIP_INDEX_URL`** (an internal PyPI mirror — Nexus, Artifactory, an Azure
   Artifacts feed) to `gw-reports-secrets`. If the URL carries a token, make it a
-  **secret** variable: both YAMLs map it into the *Prepare Python* step
-  explicitly, which is the only way ADO passes a secret to a script. pip masks
-  the password in its own output.
-- add **`HTTPS_PROXY`** the same way. Loki calls are unaffected — they bypass the
-  proxy explicitly when `BYPASS_PROXY=true`.
-- or have the admin install the OS package. The venv inherits system packages,
-  and `Prepare Python` prefers an interpreter that already has pyodbc, so pip is
-  never called:
-  - Ubuntu / Debian: `apt-get install python3-pyodbc`
-  - RHEL 9: `dnf install python3-pyodbc`
-  - **RHEL 8: not an option** — its `python3-pyodbc` is built for the platform
-    Python 3.6, which is too old. Use a mirror or a proxy.
+  **secret** variable: both YAMLs map it into *Prepare Python* explicitly, which
+  is the only way ADO passes a secret to a script. pip masks the password in its
+  own output.
+- or add **`HTTPS_PROXY`** the same way. Loki calls are unaffected — they bypass
+  the proxy explicitly when `BYPASS_PROXY=true`.
 
-### 0.5 Internal CA *(only if Loki or SQL Server use one)*
+### 0.4 Loki on an internal CA?
 
-Python on **Windows** trusts the Windows certificate store; on **Linux** it trusts
-only the OpenSSL bundle. An internal CA that "just works" for a Windows-hosted
-job fails here.
+Python on **Windows** trusts the Windows certificate store; on **Linux** it
+trusts only the OpenSSL bundle. If Loki's certificate comes from an internal CA,
+either add the CA to the agent's OS store:
 
 ```bash
 # RHEL family
@@ -126,11 +84,14 @@ sudo cp corp-root.pem /etc/pki/ca-trust/source/anchors/ && sudo update-ca-trust
 sudo cp corp-root.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates
 ```
 
-That fixes both Loki and SQL Server. Narrower alternatives if you can't touch
-the OS store: `LOKI_CA_BUNDLE=/path/to/ca.pem` for Loki, and
-`DB_TRUST_SERVER_CERT=true` for SQL Server.
+or set `LOKI_CA_BUNDLE=/path/to/ca.pem`, or — as your group does today —
+`LOKI_VERIFY_TLS=false`.
 
-### 0.6 Python outside `/usr/bin`? Refresh the agent's PATH
+SQL Server's certificate is a different matter: `pymssql` encrypts the
+connection (`DB_ENCRYPT=true`) but does not verify the server's certificate, so
+an internal CA there needs nothing.
+
+### 0.5 Python outside `/usr/bin`? Refresh the agent's PATH
 
 The commands above put Python in `/usr/bin`, which the agent already searches —
 nothing more to do.
@@ -150,11 +111,10 @@ sudo ./svc.sh stop && sudo ./svc.sh start
 
 `Prepare Python` prints the `PATH` it actually sees, so you can check.
 
-### 0.7 More than one Linux agent in `DevopsAutomation`?
+### 0.6 More than one Linux agent in `DevopsAutomation`?
 
-The demand only guarantees *a* Linux agent. If there are several, either give
-every one of them the prerequisites, or pin both pipelines to the one that has
-them by adding a second demand in each YAML:
+The demand only guarantees *a* Linux agent. Each one that can take the job
+needs 0.1; to pin both pipelines to one, add a second demand in each YAML:
 
 ```yaml
   demands:
@@ -162,9 +122,7 @@ them by adding a second demand in each YAML:
   - Agent.Name -equals <agent-name>
 ```
 
-Otherwise `check` can pass on one agent and the daily collector land on another.
-
-### 0.8 Is the database backed up?
+### 0.7 Is the database backed up?
 
 **Confirm before seeding.** Once a day ages out of Loki's ~30-day window these
 tables are the only copy and nothing can regenerate them. A machine rebuild, a
@@ -208,11 +166,9 @@ override it:
 
 | Variable | Default | Override when |
 |---|---|---|
-| `DB_TRUST_SERVER_CERT` | `false` | **Likely needed** if the SQL certificate comes from an internal CA you haven't added to the agent (0.5). Driver 18 encrypts by default. `check` says so. |
+| `DB_ENCRYPT` | `true` | The server can't negotiate TLS. `check` detects it and says so. `false` matches a default SqlClient connection, which is unencrypted. The certificate is never verified either way. |
 | `LOKI_CA_BUNDLE` | — | Loki uses an internal CA and you can't add it to the OS store. Path to a `.pem` on the agent. |
-| `PIP_INDEX_URL` / `HTTPS_PROXY` | — | The agent can't reach PyPI (0.4). |
-| `DB_ODBC_DRIVER` | newest Microsoft driver, else FreeTDS | You need a specific driver. `check` lists what's there. |
-| `DB_ENCRYPT` | `true` | Rarely. Prefer `DB_TRUST_SERVER_CERT`. |
+| `PIP_INDEX_URL` / `HTTPS_PROXY` | — | The agent can't reach PyPI (0.3). |
 | `DB_TRUSTED_CONNECTION` | `false` | Leave it. On Linux it means Kerberos and needs a ticket for the agent account. |
 | `LOOKBACK_DAYS` | `7` | Longer self-healing window. |
 | `LOKI_RETENTION_DAYS` | `30` | Your Loki keeps more or less. |
@@ -242,16 +198,18 @@ Run it three times, changing only the `action`:
 Reports **every** problem it finds in one run, then exits non-zero if anything
 would stop the collector:
 
-- the agent's OS, Python, and installed ODBC drivers
-- TCP to SQL Server and to Loki; Loki's labels; TLS trust for both
+- the agent's OS, Python, and the `pymssql` it installed
+- TCP to SQL Server and to Loki; Loki's labels and TLS trust
+- that SQL Server answers its handshake — `pymssql` would otherwise hang
+  forever on a firewall that accepts connections and then goes silent
 - SQL Server is Microsoft SQL Server, 2016 SP1 or later
 - the account can create tables and views in `dbo`, create users, and grant on `dbo`
 - once the tables exist: that `DBUSER` can read and write them
 
-A certificate problem doesn't hide the rest: `check` retries once with
-`TrustServerCertificate=yes` — for the diagnosis only — so credentials, version
-and rights are still checked, and it tells you whether `DB_TRUST_SERVER_CERT`
-would actually fix it.
+If the connection fails with encryption on, `check` retries once unencrypted —
+for the diagnosis only — so credentials, version and rights are still checked,
+and it tells you whether `DB_ENCRYPT=false` would actually fix it. A rejected
+login is reported as that, with no pointless retry.
 
 Read the **Done** section at the bottom — it lists everything to fix, labelled
 `[db]` or `[collector]`. Fix, re-run, repeat until it says *No problems found*.
@@ -321,7 +279,7 @@ report uses — see *Reconcile* in phase 5.
 ### Test 2 — Database write path *(one day)*
 
 Dry run never opens a database connection, so this is the first real test of
-credentials, ODBC and the upsert.
+credentials, `pymssql` and the upsert.
 
 **Run → `Backfill start` = yesterday, `Backfill end` = yesterday, `Dry run` off.**
 
@@ -428,17 +386,16 @@ exists; two prove the *only if source changed* box is unticked.
 | `Found N copies of tools/prepare_python.sh` | the folder exists twice | delete the stale copy, or set a pipeline variable `LOGINS_DIR` to the one to use |
 | `Unable to locate executable file: 'pwsh'` | a PowerShell step ran on a Linux agent | the `logins/` YAMLs are bash-only now — pull them. The monthly report's YAML still has a PowerShell step and fails the same way on a Linux agent |
 | `No agent found in pool DevopsAutomation which satisfies the specified demands` | no online Linux agent in that pool | bring one online, or check the agent's `Agent.OS` capability |
-| `No Python >= 3.9 found` | Python missing or too old, or outside the agent's `.path` | 0.2 / 0.3, then 0.6 |
-| `None of the Python interpreters above could create a virtualenv` | Debian/Ubuntu without `python3-venv` | 0.3 |
-| `pip could not install pyodbc` | no route to PyPI | 0.4 |
-| `cannot load the unixODBC library` | no SQL Server ODBC driver installed | 0.2 / 0.3 |
-| `No usable ODBC driver for SQL Server` … `registered in odbcinst.ini but not installed` | only unixODBC's example entries — no driver is actually installed | 0.2 / 0.3 |
-| `Can't open lib '…'` | a driver is registered but its library is missing | install that driver's package, or Microsoft's (0.2 / 0.3) |
-| `[FreeTDS]… Unable to connect` | FreeTDS gives no reason for any failure | read the next line of `check` — it retries to say whether it's the certificate |
-| `SSL Provider: [error:…:certificate verify failed…]` (Linux) or `certificate chain was issued by an authority that is not trusted` (Windows) | SQL Server uses an internal CA | 0.5, or `DB_TRUST_SERVER_CERT=true` — `check` confirms which works |
-| `TrustServerCertificate=yes fails the same way` | TLS protocol mismatch, not trust — e.g. an old SQL Server without TLS 1.2 | patch SQL Server; the setting won't help |
+| `No Python >= 3.9 found` | Python missing or too old, or outside the agent's `.path` | 0.2, then 0.5 |
+| `None of the Python interpreters above could create a virtualenv` | Debian/Ubuntu without `python3-venv` | 0.2 |
+| `pip could not install pymssql==…` | no route to PyPI | 0.3 |
+| `pymssql is not installed` | the install step failed — see its warnings | 0.3 |
+| `accepted the connection but never answered SQL Server's handshake` | a firewall or proxy swallows the traffic, or it isn't SQL Server | check the path to `DBINSTANCE`; `pymssql` would have hung here |
+| `Confirmed: it connects unencrypted` | the server can't negotiate TLS | `DB_ENCRYPT=false` in `gw-reports-secrets`, or enable TLS on the server |
+| `nothing is listening there` / `Connection refused` | wrong host or port in `DBINSTANCE` | `host` or `host,port` — never `host:port` |
+| `Cannot open database` | `DBNAME` wrong, or the login has no user in it | fix `DBNAME`, or a DBA maps the login |
 | `The collector runs as '…', which lacks: INSERT on …` | `DBUSER` created the tables but can't write them | a DBA grants it (e.g. `db_datawriter`) |
-| `Loki's certificate is not trusted on this agent` | Loki uses an internal CA | 0.5, or `LOKI_CA_BUNDLE` |
+| `Loki's certificate is not trusted on this agent` | Loki uses an internal CA | 0.4, or `LOKI_CA_BUNDLE` |
 | `Login failed for user` | wrong `DBUSER` / `DBPASS` | fix the DB variable group |
 | `older than 2016 SP1` | SQL Server too old for `CREATE OR ALTER` | use a newer instance |
 | Collector ran once, then never again | *Only schedule builds if the source … changed* is ticked | phase 3, step 2 |

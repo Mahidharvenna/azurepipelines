@@ -1,5 +1,6 @@
 # Daily login collector: Loki -> SQL Server.
-# Python; standard library plus pyodbc (the only pip dependency).
+# Python; standard library plus pymssql (the only pip dependency -- its wheel
+# carries its own SQL Server client, so no ODBC driver is needed).
 #
 # Grafana reads SQL Server, so the dashboard is not capped by Loki's ~30-day
 # retention. Companion to reports/monthly_report.py -- same Loki selector, same
@@ -36,10 +37,8 @@ parameters:
 # ADO Server 2022 RTW rejects a template expression on pool.name, so this is a
 # literal. Demands are fine under a literal name.
 #
-# Pinned to Linux: the steps below are bash, and the ODBC driver is installed
-# per machine, so the setup 'check' and the daily collector must land on the
-# same kind of agent. If 'DevopsAutomation' holds more than one Linux agent, either give
-# every one of them the prerequisites (DEPLOY.md) or pin the one that has them:
+# Pinned to Linux: the steps below are bash. Each Linux agent that can take
+# the job needs Python 3.9+ (DEPLOY.md, phase 0). To pin a specific one:
 #   - Agent.Name -equals <agent-name>
 pool:
   name: DevopsAutomation
@@ -55,7 +54,7 @@ variables:
 # LOGIN_USER_REGEX, REPORT_TIMEZONE, ENVS and PRODUCT_JOBS must be identical in
 # both jobs or the dashboard silently stops reconciling with the spreadsheet --
 # one group makes drift impossible. Collector-only settings (LOOKBACK_DAYS,
-# DB_TRUST_SERVER_CERT, ...) all have working defaults; add them here only to
+# DB_ENCRYPT, ...) all have working defaults; add them here only to
 # override. The group also holds SMTP secrets; they are never mapped into this
 # job's env, and ADO does not expose an unmapped secret to a script.
 - group: 'gw-reports-secrets'
@@ -105,12 +104,14 @@ steps:
 # UsePythonVersion@0 only searches the agent tool cache, so it fails on
 # self-hosted agents even with Python installed. prepare_python.sh picks the
 # newest python3 >= 3.9 on PATH, builds a job-local venv (avoids PEP 668 and
-# old system pip), installs pyodbc into it, prints what the agent has, and sets
+# old system pip), installs pymssql into it -- whose wheel carries its own SQL
+# Server client, so no ODBC driver or admin install -- and sets
 # $(PYTHON_EXE). It is a file rather than inline so ADO cannot macro-expand the
 # $(...) inside it.
 - script: bash "$(LOGINS_DIR)/tools/prepare_python.sh" "$(Agent.TempDirectory)"
   displayName: 'Prepare Python'
   workingDirectory: '$(Build.SourcesDirectory)'
+  timeoutInMinutes: 15
   env:
     # Only needed when the agent can't reach PyPI (DEPLOY.md 0.4). Mapped
     # explicitly so a feed URL holding a credential can be a secret variable --
@@ -123,6 +124,9 @@ steps:
 - script: '"$(PYTHON_EXE)" "$(LOGINS_DIR)/collect_logins.py"'
   displayName: 'Collect logins into SQL Server'
   workingDirectory: '$(Build.SourcesDirectory)'
+  # Generous: a 30-day backfill pulls every raw login line. The limit is there
+  # so a stuck run can't hold an agent indefinitely.
+  timeoutInMinutes: 180
   env:
     # --- Loki ---
     LOKI_URL:            $(LOKI_URL)
@@ -138,10 +142,8 @@ steps:
     DB_USER:               $(DBUSER)
     DB_PASS:               $(DBPASS)
     DB_SCHEMA:             $(DB_SCHEMA)
-    DB_ODBC_DRIVER:        $(DB_ODBC_DRIVER)
     DB_TRUSTED_CONNECTION: $(DB_TRUSTED_CONNECTION)
     DB_ENCRYPT:            $(DB_ENCRYPT)
-    DB_TRUST_SERVER_CERT:  $(DB_TRUST_SERVER_CERT)
     # --- scope (mirror the report's variable group) ---
     ENVS:             $(ENVS)
     ENVS_EXCLUDE:     $(ENVS_EXCLUDE)

@@ -10,11 +10,11 @@ the first -- each miss would otherwise cost a full pipeline round-trip. It
 exits non-zero if anything would stop the collector, even when the database
 side is fine.
 
-Because it uses pyodbc rather than sqlcmd, it does three things sqlcmd does
+Because it uses pymssql rather than sqlcmd, it does three things sqlcmd does
 client-side and the server knows nothing about:
   * split each file on GO      -- a batch separator, not T-SQL
   * expand :setvar / $(TOKEN)  -- a sqlcmd variable construct
-  * surface PRINT as headings  -- pyodbc does not expose PRINT output
+  * surface PRINT as headings  -- the client does not expose PRINT output
 
 Configuration comes from environment variables set by the pipeline, so no
 secret is ever passed as an argument (arguments are echoed in the build log).
@@ -39,10 +39,10 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gwcommon import (env, env_bool, harden_stdio, explain_import_error, choose_driver,
-                      parse_server, explain_connect_error, loki_ssl_context, is_cert_error,
-                      LOKI_CERT_HINT, one_line, driver_kind, connection_string as build_connstr,
-                      apply_session_options, missing_driver_libraries)
+from gwcommon import (env, env_bool, harden_stdio, explain_import_error, parse_server,
+                      explain_connect_error, loki_ssl_context, is_cert_error, LOKI_CERT_HINT,
+                      one_line, connect_sql, apply_session_options, tds_probe,
+                      is_login_failure, sql_error_text)
 
 harden_stdio()
 
@@ -62,10 +62,8 @@ DB_SERVER = env("DB_SERVER")
 DB_NAME = env("DB_NAME")
 DB_USER = env("DB_USER")
 DB_PASS = env("DB_PASS")
-DB_DRIVER_REQUESTED = env("DB_ODBC_DRIVER")       # blank = newest installed
 DB_TRUSTED = env_bool("DB_TRUSTED_CONNECTION", False)
 DB_ENCRYPT = env_bool("DB_ENCRYPT", True)
-DB_TRUST_CERT = env_bool("DB_TRUST_SERVER_CERT", False)
 
 LOKI_URL = env("LOKI_URL").rstrip("/")
 LOKI_VERIFY = env_bool("LOKI_VERIFY_TLS", True)
@@ -103,49 +101,31 @@ def blocker(kind, text):
 # ---------------------------------------------------------------------------
 # database
 # ---------------------------------------------------------------------------
-_pyodbc = None
-_driver = None
+_sql = None
 
 
-def get_pyodbc():
-    """Import pyodbc lazily, so 'check' can still report everything else when
-    the ODBC stack is missing."""
-    global _pyodbc
-    if _pyodbc is None:
+def get_sql():
+    """Import pymssql lazily, so 'check' can still report everything else if
+    the install step failed."""
+    global _sql
+    if _sql is None:
         try:
-            import pyodbc
+            import pymssql
         except ImportError as ex:
             raise SystemExit(explain_import_error(ex))
-        _pyodbc = pyodbc
-    return _pyodbc
-
-
-def get_driver():
-    global _driver
-    if _driver is None:
-        listed = get_pyodbc().drivers()
-        driver, problem = choose_driver(listed, DB_DRIVER_REQUESTED,
-                                        missing_driver_libraries(listed))
-        if problem:
-            raise SystemExit(problem)
-        _driver = driver
-    return _driver
-
-
-def connection_string():
-    if not DB_TRUSTED and not DB_USER:
-        raise SystemExit("Set DB_USER/DB_PASS, or DB_TRUSTED_CONNECTION=true.")
-    return build_connstr(get_driver(), DB_SERVER, DB_NAME, DB_USER, DB_PASS, DB_TRUSTED,
-                         DB_ENCRYPT, DB_TRUST_CERT, app="GW-Login-Setup")
+        _sql = pymssql
+    return _sql
 
 
 def connect():
-    p = get_pyodbc()
+    p = get_sql()
+    if not DB_TRUSTED and not DB_USER:
+        raise SystemExit("Set DB_USER/DB_PASS, or DB_TRUSTED_CONNECTION=true.")
     try:
-        cn = p.connect(connection_string(), timeout=30)
+        cn = connect_sql(p, DB_SERVER, DB_NAME, DB_USER, DB_PASS, DB_TRUSTED, DB_ENCRYPT,
+                         timeout=600, appname="GW-Login-Setup", autocommit=True)
     except p.Error as ex:
         raise SystemExit(explain_connect_error(ex, DB_SERVER, DB_NAME))
-    cn.autocommit = True          # DDL and GRANT; no transaction to manage
     apply_session_options(cn)
     return cn
 
@@ -155,9 +135,10 @@ def query(sql):
     try:
         cur = cn.cursor()
         try:
-            cur.execute(sql)
-        except get_pyodbc().Error as ex:
-            raise SystemExit("Query failed: %s\n  query: %s" % (ex, " ".join(sql.split())[:160]))
+            cur.execute(sql)          # no params: pymssql leaves '%' in the SQL alone
+        except get_sql().Error as ex:
+            raise SystemExit("Query failed: %s\n  query: %s"
+                             % (sql_error_text(ex), " ".join(sql.split())[:160]))
         return cur.fetchall() if cur.description else []
     finally:
         cn.close()
@@ -242,7 +223,7 @@ def split_batches(text):
 def split_labelled(batch):
     """Split one batch into (label, sql) chunks on PRINT lines.
 
-    pyodbc gives no access to PRINT output, so the PRINT statements -- which is
+    The client gives no access to PRINT output, so the PRINT statements -- which is
     where verify.sql keeps its section headings -- would otherwise vanish.
     """
     chunks, label, buf = [], None, []
@@ -417,72 +398,61 @@ def preflight():
                 else:
                     blocker("collector", "Loki HTTP probe failed: %s. Check BYPASS_PROXY." % ex)
 
-    # --- 3. ODBC stack -----------------------------------------------------------
+    # --- 3. SQL Server client and handshake ----------------------------------
     try:
-        p = get_pyodbc()
-        ok("pyodbc %s" % getattr(p, "version", "?"))
-        installed = p.drivers()
-        ghosts = missing_driver_libraries(installed)
-        info("ODBC drivers registered: %s" % (", ".join(installed) or "none"))
-        if ghosts:
-            info("...of which NOT installed (library missing): %s"
-                 % ", ".join("%s -> %s" % kv for kv in ghosts.items()))
-        driver = get_driver()
-        if driver_kind(driver) == "freetds":
-            ok("using %s -- Microsoft's driver is preferred and is picked automatically "
-               "once installed" % driver)
-        else:
-            ok("using %s%s" % (driver, "" if DB_DRIVER_REQUESTED else " (newest installed)"))
+        p = get_sql()
+        ok("pymssql %s -- carries its own SQL Server client, no ODBC driver needed"
+           % getattr(p, "__version__", "?"))
     except SystemExit as ex:
         blocker("db", str(ex))
-        return                          # nothing below can run without a driver
+        return
+    if sql_host and sql_port:
+        # pymssql hangs indefinitely if a server accepts the connection and then
+        # says nothing, so find that out here, with a timeout, first.
+        answer = tds_probe(sql_host, sql_port)
+        if answer == "silent":
+            blocker("db", "%s:%d accepted the connection but never answered SQL Server's "
+                          "handshake -- a firewall or proxy is swallowing the traffic, or it "
+                          "isn't SQL Server. Connecting would hang, so stopping here."
+                    % (sql_host, sql_port))
+            return
+        if answer == "answered":
+            ok("SQL Server answered the handshake")
 
     # --- 4. database ---------------------------------------------------------
-    global DB_TRUST_CERT
-    configured_trust = DB_TRUST_CERT
+    global DB_ENCRYPT
+    configured_encrypt = DB_ENCRYPT
     try:
         _database_checks()
     except SystemExit as ex:
         blocker("db", str(ex))
     finally:
-        DB_TRUST_CERT = configured_trust
+        DB_ENCRYPT = configured_encrypt
 
 
 def _database_checks():
-    global DB_TRUST_CERT
+    global DB_ENCRYPT
     try:
         version = str(scalar("SELECT @@VERSION") or "")
     except SystemExit as ex:
         first = str(ex)
-        freetds = driver_kind(get_driver()) == "freetds"
-        # FreeTDS says 'unable to connect' for everything, a bad certificate
-        # included, so for FreeTDS the retry is the only way to tell.
-        # A driver that can't even load says nothing about certificates, and a
-        # retry would only repeat the same failure under a misleading message.
-        if DB_TRUST_CERT or "can't open lib" in first.lower() or not (freetds or "TLS:" in first):
+        low = first.lower()
+        # Retrying can only tell us something if encryption could be the cause.
+        if (not DB_ENCRYPT or is_login_failure(first) or "4060" in first
+                or "cannot open database" in low or "connection refused" in low):
             raise
-        # A certificate problem hides everything behind it -- credentials,
-        # version, rights -- and would cost a second run to discover. Retry once
-        # without validating the certificate, for this diagnosis only.
-        info(("FreeTDS could not connect -- it does not say why" if freetds else "TLS failed") +
-             " -- retrying once with certificate checks off (diagnosis only, this run only).")
-        DB_TRUST_CERT = True
+        info("Could not connect with encryption on -- retrying once unencrypted "
+             "(diagnosis only, this run only).")
+        DB_ENCRYPT = False
         try:
             version = str(scalar("SELECT @@VERSION") or "")
-        except SystemExit as ex2:
-            if freetds:
-                raise SystemExit(first + "\n  -> Still fails with certificate checks off, so it "
-                                 "is not the certificate: check DBUSER/DBPASS, DBINSTANCE and that "
-                                 "the login may use this database.")
-            if "TLS:" in str(ex2):
-                raise SystemExit(first + "\n  -> TrustServerCertificate=yes fails the same way, "
-                                 "so DB_TRUST_SERVER_CERT will NOT fix this: it is a TLS protocol "
-                                 "mismatch (e.g. a SQL Server without TLS 1.2), not certificate trust.")
-            blocker("db", first)
-            raise
-        blocker("db", first + "\n  -> Confirmed: the certificate is the problem -- it connects with "
-                      "certificate checks off, and the checks below ran that way. Set "
-                      "DB_TRUST_SERVER_CERT=true, or install the issuing CA on the agent.")
+        except SystemExit:
+            raise SystemExit(first + "\n  -> Fails unencrypted too, so encryption is not the "
+                             "cause.")
+        blocker("db", first + "\n  -> Confirmed: it connects unencrypted -- as a default "
+                      "SqlClient connection does -- but not encrypted. Set DB_ENCRYPT=false in "
+                      "the variable group (the checks below ran that way), or enable TLS on "
+                      "the server.")
 
     ok("Connected. %s" % version.split("\n")[0].strip())
     if "Microsoft SQL Server" not in version:
@@ -575,7 +545,8 @@ def main():
     print("Action           : %s" % args.action)
     print("Database         : %s / %s" % (DB_SERVER, DB_NAME))
     print("Auth             : %s" % ("integrated" if DB_TRUSTED else "SQL login '%s'" % DB_USER))
-    print("Encrypt          : %s  (TrustServerCertificate=%s)" % (DB_ENCRYPT, DB_TRUST_CERT))
+    print("Encrypt          : %s%s" % (DB_ENCRYPT, "  (server certificate not verified)"
+                                         if DB_ENCRYPT else ""))
 
     if args.action in ("check", "all"):
         preflight()
