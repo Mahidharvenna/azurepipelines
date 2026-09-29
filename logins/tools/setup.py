@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gwcommon import (env, env_bool, harden_stdio, explain_import_error, choose_driver,
                       parse_server, explain_connect_error, loki_ssl_context, is_cert_error,
                       LOKI_CERT_HINT, one_line, driver_kind, connection_string as build_connstr,
-                      apply_session_options)
+                      apply_session_options, missing_driver_libraries)
 
 harden_stdio()
 
@@ -123,7 +123,9 @@ def get_pyodbc():
 def get_driver():
     global _driver
     if _driver is None:
-        driver, problem = choose_driver(get_pyodbc().drivers(), DB_DRIVER_REQUESTED)
+        listed = get_pyodbc().drivers()
+        driver, problem = choose_driver(listed, DB_DRIVER_REQUESTED,
+                                        missing_driver_libraries(listed))
         if problem:
             raise SystemExit(problem)
         _driver = driver
@@ -420,7 +422,11 @@ def preflight():
         p = get_pyodbc()
         ok("pyodbc %s" % getattr(p, "version", "?"))
         installed = p.drivers()
-        info("ODBC drivers on this agent: %s" % (", ".join(installed) or "none"))
+        ghosts = missing_driver_libraries(installed)
+        info("ODBC drivers registered: %s" % (", ".join(installed) or "none"))
+        if ghosts:
+            info("...of which NOT installed (library missing): %s"
+                 % ", ".join("%s -> %s" % kv for kv in ghosts.items()))
         driver = get_driver()
         if driver_kind(driver) == "freetds":
             ok("using %s -- Microsoft's driver is preferred and is picked automatically "
@@ -451,7 +457,9 @@ def _database_checks():
         freetds = driver_kind(get_driver()) == "freetds"
         # FreeTDS says 'unable to connect' for everything, a bad certificate
         # included, so for FreeTDS the retry is the only way to tell.
-        if DB_TRUST_CERT or not (freetds or "TLS:" in first):
+        # A driver that can't even load says nothing about certificates, and a
+        # retry would only repeat the same failure under a misleading message.
+        if DB_TRUST_CERT or "can't open lib" in first.lower() or not (freetds or "TLS:" in first):
             raise
         # A certificate problem hides everything behind it -- credentials,
         # version, rights -- and would cost a second run to discover. Retry once

@@ -10,6 +10,8 @@ import os
 import re
 import ssl
 import sys
+import subprocess
+import configparser
 
 
 # --------------------------------------------------------------------------
@@ -81,7 +83,50 @@ def driver_kind(name):
     return "other"
 
 
-def choose_driver(installed, requested=""):
+def odbcinst_path():
+    """Where unixODBC reads driver registrations from (None on Windows)."""
+    if os.name == "nt":
+        return None
+    try:
+        out = subprocess.run(["odbcinst", "-j"], capture_output=True, text=True,
+                             timeout=10).stdout
+        m = re.search(r"^DRIVERS\.*:\s*(\S+)", out, re.M)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return os.path.join(os.environ.get("ODBCSYSINI", "/etc"),
+                        os.environ.get("ODBCINSTINI", "odbcinst.ini"))
+
+
+def missing_driver_libraries(names):
+    """{driver: library} for drivers that are REGISTERED but not INSTALLED.
+
+    pyodbc.drivers() lists every section of odbcinst.ini, whether or not its
+    shared library exists -- and RHEL's unixODBC ships an example odbcinst.ini
+    registering PostgreSQL, MySQL, MySQL-5, FreeTDS and MariaDB with none of
+    them installed. Picking one of those fails later with the far less clear
+    "Can't open lib". unixODBC loads Driver64 on 64-bit systems when present.
+    """
+    path = odbcinst_path()
+    if not path or not os.path.isfile(path):
+        return {}
+    cp = configparser.ConfigParser(strict=False, interpolation=None)
+    try:
+        cp.read(path)
+    except Exception:
+        return {}
+    missing = {}
+    for name in names:
+        if not cp.has_section(name):
+            continue
+        lib = cp.get(name, "driver64", fallback="") or cp.get(name, "driver", fallback="")
+        if lib and os.path.isabs(lib) and not os.path.exists(lib):
+            missing[name] = lib
+    return missing
+
+
+def choose_driver(installed, requested="", missing=None):
     """Return (driver_name, problem). Exactly one of them is None.
 
     With no DB_ODBC_DRIVER set: the newest Microsoft 'ODBC Driver NN for SQL
@@ -91,8 +136,13 @@ def choose_driver(installed, requested=""):
     literally named 'SQL Server' is never picked: it predates TLS 1.2 and the
     connection options used here.
     """
-    installed = list(installed or [])
+    missing = missing or {}
+    listed = list(installed or [])
+    installed = [d for d in listed if d not in missing]
     if requested:
+        if requested in missing:
+            return None, ("DB_ODBC_DRIVER is '%s', which is registered but not installed: %s "
+                          "does not exist." % (requested, missing[requested]))
         if requested in installed:
             return requested, None
         return None, ("DB_ODBC_DRIVER is '%s' but this agent has: %s. Unset DB_ODBC_DRIVER "
@@ -104,9 +154,14 @@ def choose_driver(installed, requested=""):
     freetds = [d for d in installed if driver_kind(d) == "freetds"]
     if freetds:
         return freetds[0], None
-    return None, ("No ODBC driver for SQL Server on this agent (found: %s). An admin installs "
-                  "either Microsoft's msodbcsql18 or FreeTDS -- see DEPLOY.md, phase 0."
-                  % (", ".join(installed) or "none"))
+    ghosts = [d for d in listed if d in missing]
+    detail = "found: %s" % (", ".join(installed) or "none")
+    if ghosts:
+        detail += ("; registered in odbcinst.ini but not installed: %s -- unixODBC's example "
+                   "entries" % ", ".join("%s (%s missing)" % (d, missing[d]) for d in ghosts))
+    return None, ("No usable ODBC driver for SQL Server on this agent (%s). An admin must "
+                  "install one: Microsoft's msodbcsql18 (preferred) or FreeTDS -- see "
+                  "DEPLOY.md, phase 0." % detail)
 
 
 def odbc_quote(value):
@@ -229,7 +284,10 @@ def explain_connect_error(ex, server, database):
         hints.append("Credentials: SQL Server rejected the login. Check DBUSER/DBPASS in the DB "
                      "variable group.")
     if "can't open lib" in low:
-        hints.append("Driver: the ODBC driver library could not be loaded. Reinstall msodbcsql18.")
+        m = re.search(r"can't open lib '([^']+)'", text, re.I)
+        hints.append("Driver: %s is registered in odbcinst.ini but cannot be loaded -- its "
+                     "package is not installed (or is broken). Nothing about the database was "
+                     "tested." % (m.group(1) if m else "the ODBC driver library"))
     if "kerberos" in low or "gss" in low or "sspi" in low:
         hints.append("Integrated auth on Linux means Kerberos, which needs a ticket for the agent "
                      "account. Use SQL auth: DB_TRUSTED_CONNECTION=false.")

@@ -39,11 +39,13 @@ file it needs is committed.
 | Route to PyPI, **or** an internal mirror | installs pyodbc into the job venv | `Prepare Python` warns; `check` fails. See 0.4 |
 | Internal CA in the OS trust store | only if Loki or SQL Server use an internal CA | `check` fails with a certificate error |
 
-**Already have FreeTDS?** Many Linux agents do — `check` lists the ODBC drivers it
-finds. If FreeTDS is there, skip the driver install below: the pipelines use it
-automatically, and switch to Microsoft's driver by themselves once it appears.
-FreeTDS is a mature open-source driver for SQL Server; Microsoft's is preferred
-only because it's the vendor's own and gives clearer error messages.
+**FreeTDS in the driver list? Don't trust the list alone.** RHEL's unixODBC
+package installs an *example* `/etc/odbcinst.ini` that registers PostgreSQL,
+MySQL, MySQL-5, FreeTDS and MariaDB without installing any of them — so a list
+of exactly those five usually means **no** SQL Server driver at all. `check`
+looks for each driver's library on disk and says which are real. If FreeTDS
+genuinely is installed, the pipelines use it automatically, and switch to
+Microsoft's driver by themselves once that appears.
 
 Otherwise the driver is the one piece of admin work this design can't avoid:
 it needs root, and Microsoft's needs a EULA acceptance.
@@ -56,6 +58,10 @@ curl -fsSL "https://packages.microsoft.com/config/rhel/$(rpm -E %rhel)/prod.repo
   | sudo tee /etc/yum.repos.d/mssql-release.repo
 sudo ACCEPT_EULA=Y dnf install -y msodbcsql18
 ```
+
+(The alternative, FreeTDS, is `freetds-libs` from EPEL — it fills in the example
+`[FreeTDS]` entry. Microsoft's driver is preferred: it's the vendor's, and its
+errors say what went wrong.)
 
 `venv` ships with Python on RHEL. RHEL 8's default `python3` is 3.6 — too old —
 which is why this installs `python3.11` alongside it; `Prepare Python` picks the
@@ -426,7 +432,8 @@ exists; two prove the *only if source changed* box is unticked.
 | `None of the Python interpreters above could create a virtualenv` | Debian/Ubuntu without `python3-venv` | 0.3 |
 | `pip could not install pyodbc` | no route to PyPI | 0.4 |
 | `cannot load the unixODBC library` | no SQL Server ODBC driver installed | 0.2 / 0.3 |
-| `No ODBC driver for SQL Server on this agent` | neither Microsoft's driver nor FreeTDS | 0.2 / 0.3, or `dnf install freetds` (EPEL) / `apt-get install tdsodbc` |
+| `No usable ODBC driver for SQL Server` … `registered in odbcinst.ini but not installed` | only unixODBC's example entries — no driver is actually installed | 0.2 / 0.3 |
+| `Can't open lib '…'` | a driver is registered but its library is missing | install that driver's package, or Microsoft's (0.2 / 0.3) |
 | `[FreeTDS]… Unable to connect` | FreeTDS gives no reason for any failure | read the next line of `check` — it retries to say whether it's the certificate |
 | `SSL Provider: [error:…:certificate verify failed…]` (Linux) or `certificate chain was issued by an authority that is not trusted` (Windows) | SQL Server uses an internal CA | 0.5, or `DB_TRUST_SERVER_CERT=true` — `check` confirms which works |
 | `TrustServerCertificate=yes fails the same way` | TLS protocol mismatch, not trust — e.g. an old SQL Server without TLS 1.2 | patch SQL Server; the setting won't help |

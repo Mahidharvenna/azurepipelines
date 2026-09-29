@@ -36,7 +36,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
 from gwcommon import (env, env_bool, harden_stdio, explain_import_error, choose_driver,
                       explain_connect_error, loki_ssl_context, is_cert_error, LOKI_CERT_HINT,
-                      connection_string, apply_session_options)
+                      connection_string, apply_session_options, missing_driver_libraries)
 
 harden_stdio()
 
@@ -385,7 +385,8 @@ def target_days():
 # --------------------------------------------------------------------------
 def connect():
     p = get_pyodbc()
-    driver, problem = choose_driver(p.drivers(), DB_DRIVER)
+    listed = p.drivers()
+    driver, problem = choose_driver(listed, DB_DRIVER, missing_driver_libraries(listed))
     if problem:
         raise SystemExit(problem)
     if not DB_TRUSTED and not DB_USER:
