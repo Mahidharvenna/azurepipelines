@@ -192,7 +192,8 @@ authorization fails the run at queue time, before any step runs.
 `/Grafana/logins/gw-login-setup.yaml`) → **Save**, then **⋯ → Rename** it to
 `GW-Login-Setup` — otherwise ADO names it after the repo, e.g. `<repo> (1)`.
 
-Run it three times, changing only the `action`:
+Run it three times, changing only the `action`. The two login boxes show
+`none`, which means *not set* — leave them unless a step below says otherwise.
 
 ### `check` *(writes nothing)*
 
@@ -220,12 +221,57 @@ Read the **Done** section at the bottom — it lists everything to fix, labelled
 Creates three tables and three views, then confirms all six exist by name.
 Idempotent — safe to re-run.
 
+The pipeline's account creates them, so it needs the rights to. If `check`
+warned *This account lacks …, which 'schema' needs*, it printed the exact
+`GRANT` lines. A DBA runs them in the database once — for an account
+`svc_user` lacking all three:
+
+```sql
+GRANT CREATE TABLE TO [svc_user];
+GRANT CREATE VIEW TO [svc_user];
+GRANT ALTER ON SCHEMA::dbo TO [svc_user];
+```
+
+All three are needed: creating anything in `dbo` takes `ALTER` on the schema
+as well as `CREATE TABLE` / `CREATE VIEW`.
+
+Creating a table in `dbo` doesn't make the account its owner, so `schema` then
+checks it can read and write the three tables. If it can't — it can if it's in
+`db_datareader` + `db_datawriter` — `schema` prints those `GRANT` lines too, on
+just the three tables:
+
+```sql
+GRANT SELECT, INSERT, UPDATE ON dbo.gw_login_daily TO [svc_user];
+GRANT SELECT, INSERT, UPDATE ON dbo.gw_login_collector_run TO [svc_user];
+GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.gw_login_user_daily TO [svc_user];
+```
+
+The collector itself only needs this second set; the first is for `schema`.
+Once `schema` has succeeded and the second set is in place, a DBA can revoke
+the first — `schema` prints the exact `REVOKE` lines for rights granted
+directly. `ALTER` on `dbo` reaches every object in `dbo`, so a shared account
+shouldn't keep it. Re-grant only when `schema.sql` changes.
+
+```sql
+REVOKE CREATE TABLE FROM [svc_user];
+REVOKE CREATE VIEW FROM [svc_user];
+REVOKE ALTER ON SCHEMA::dbo FROM [svc_user];
+```
+
+After that, `check` shows the three views as not visible to the account —
+expected: the collector doesn't use them, and Grafana reads them with its own
+login.
+
 ### `grants` — set `grafanaLogin`
 
 Grants a **read-only** login to Grafana. Create that SQL login first (DBA); the
 pipeline adds the database user and permissions but can't create a server login.
 
-Leave `collectorLogin` blank. It defaults to `DBUSER`, which is also the account
+Skip this if `check` said the account can't create database users — the
+usual case, and the right one for a shared account. A DBA then runs section 2
+of `grants.sql` (the Grafana part) with the Grafana login filled in.
+
+Leave `collectorLogin` at `none`. It defaults to `DBUSER`, which is also the account
 running the pipeline, so `grants.sql` skips it — SQL Server refuses a grant to
 yourself. Instead, the pipeline **checks** that `DBUSER` can already read and
 write the three tables, and stops with the exact missing rights if not. (Creating
@@ -291,7 +337,7 @@ upsert is idempotent, which is what makes the daily lookback safe.
 
 Loki holds ~30 days right now; whatever you don't capture is gone.
 
-**Run → `Backfill start` = 30 days ago → Run.**
+**Run → `Backfill start` = 30 days ago, `Backfill end` left at `none` → Run.**
 
 Expect this to take noticeably longer than the report: it pulls raw log lines
 rather than counts, because that's what usernames require.
@@ -382,6 +428,7 @@ exists; two prove the *only if source changed* box is unticked.
 | You see | Cause | Fix |
 |---|---|---|
 | `logins/tools/prepare_python.sh: No such file or directory` | an older YAML that assumed `logins/` at the repo root | pull the current YAMLs — they find the folder themselves |
+| Run dialog: a text box marked *Required*, Run greyed out, *unavailable while parameters are invalid* | an older YAML whose optional text parameters default to `''` — this ADO Server treats that as required | pull the current YAMLs — they default to `none` |
 | `No tools/prepare_python.sh anywhere in this repo` | the folder was copied in but new files never `git add`-ed | `git add <folder>`, commit, push |
 | `Missing from the checked-out repo: …` | same, for the files named | same |
 | `Found N copies of tools/prepare_python.sh` | the folder exists twice | delete the stale copy, or set a pipeline variable `LOGINS_DIR` to the one to use |
@@ -394,8 +441,9 @@ exists; two prove the *only if source changed* box is unticked.
 | `accepted the connection but never answered SQL Server's handshake` | a firewall or proxy swallows the traffic, or it isn't SQL Server | check the path to `DBINSTANCE`; `pymssql` would have hung here |
 | `Confirmed: it connects unencrypted` | the server can't negotiate TLS | `DB_ENCRYPT=false` in `gw-reports-secrets`, or enable TLS on the server |
 | `nothing is listening there` / `Connection refused` | wrong host or port in `DBINSTANCE` | `host` or `host,port` — never `host:port` |
+| `This account lacks …, which 'schema' needs` | `DBUSER` has no DDL rights in `dbo` | a DBA runs the `GRANT` lines printed under it (phase 2, `schema`) |
 | `Cannot open database` | `DBNAME` wrong, or the login has no user in it | fix `DBNAME`, or a DBA maps the login |
-| `The collector runs as '…', which lacks: INSERT on …` | `DBUSER` created the tables but can't write them | a DBA grants it (e.g. `db_datawriter`) |
+| `The collector runs as '…', which lacks: INSERT on …` | `DBUSER` created the tables but can't write them | a DBA runs the `GRANT` lines printed under it (phase 2, `schema`) |
 | `Loki's certificate is not trusted on this agent` | Loki uses an internal CA | 0.4, or `LOKI_CA_BUNDLE` |
 | `Login failed for user` | wrong `DBUSER` / `DBPASS` | fix the DB variable group |
 | `older than 2016 SP1` | SQL Server too old for `CREATE OR ALTER` | use a newer instance |
@@ -406,7 +454,8 @@ exists; two prove the *only if source changed* box is unticked.
 
 ## Rollback
 
-Nothing above modifies an existing object.
+Nothing above modifies an existing object; the only change outside the new
+objects is the rights granted to `DBUSER` in phase 2.
 
 1. Disable `GW-Login-Collector`.
 2. Delete the Grafana dashboard and alert rule.
@@ -416,6 +465,10 @@ Nothing above modifies an existing object.
 ```bash
 sqlcmd -S <server> -d <database> -Q "DROP VIEW IF EXISTS dbo.gw_login_monthly; DROP VIEW IF EXISTS dbo.gw_login_monthly_users; DROP VIEW IF EXISTS dbo.gw_login_freshness; DROP TABLE IF EXISTS dbo.gw_login_user_daily; DROP TABLE IF EXISTS dbo.gw_login_daily; DROP TABLE IF EXISTS dbo.gw_login_collector_run;"
 ```
+
+4. If `DBUSER` still holds the `CREATE TABLE` / `CREATE VIEW` / `ALTER ON
+   SCHEMA::dbo` rights from phase 2, revoke them (the `REVOKE` lines there).
+   Its rights on the three tables go with the tables.
 
 The monthly report is untouched throughout — it reads Loki directly and has no
 dependency on any of this.

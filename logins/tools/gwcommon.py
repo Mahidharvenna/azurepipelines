@@ -33,6 +33,19 @@ def env_bool(name, default=False):
     return v in ("true", "1", "yes", "y")
 
 
+# What the pipelines' optional text parameters default to. The Run dialog of
+# ADO Server 2022 marks a text parameter whose default is '' as Required and
+# won't start until something is typed -- so they default to this instead.
+PARAM_BLANK = "none"
+
+
+def param(value):
+    """A pipeline text parameter's value, with the 'none' placeholder (or '-',
+    or only spaces) read as blank."""
+    v = (value or "").strip()
+    return "" if v.lower() in (PARAM_BLANK, "-") else v
+
+
 def one_line(text):
     """ADO keeps only the first line of a ##vso[task.logissue] message, so a
     multi-line explanation would lose its hints in the run summary."""

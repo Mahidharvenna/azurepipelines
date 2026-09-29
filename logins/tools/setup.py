@@ -42,17 +42,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gwcommon import (env, env_bool, harden_stdio, explain_import_error, parse_server,
                       explain_connect_error, loki_ssl_context, is_cert_error, LOKI_CERT_HINT,
                       one_line, connect_sql, apply_session_options, tds_probe,
-                      is_login_failure, sql_error_text)
+                      is_login_failure, sql_error_text, param)
 
 harden_stdio()
 
 MIN_PY = (3, 9)
 # 13.0.4001 = SQL Server 2016 SP1, the first build with CREATE OR ALTER.
 MIN_SQL = (13, 0, 4001)
-EXPECTED_OBJECTS = sorted([
-    "gw_login_daily", "gw_login_user_daily", "gw_login_collector_run",   # tables
-    "gw_login_monthly", "gw_login_monthly_users", "gw_login_freshness",  # views
-])
+TABLES = ["gw_login_daily", "gw_login_user_daily", "gw_login_collector_run"]
+VIEWS = ["gw_login_monthly", "gw_login_monthly_users", "gw_login_freshness"]
+EXPECTED_OBJECTS = sorted(TABLES + VIEWS)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +165,71 @@ def missing_dml():
         % (perm, table, table, perm)
         for table, perms in COLLECTOR_DML for perm in perms)
     return [need for need, has in query(checks) if has != 1]
+
+
+def schema_needs(present):
+    """(right, HAS_PERMS_BY_NAME test) pairs that schema.sql needs, given the
+    objects that already exist. Creating anything in dbo takes ALTER on the
+    schema as well as CREATE TABLE / CREATE VIEW. Once everything exists a
+    re-run creates nothing -- its CREATE TABLEs and indexes are guarded -- and
+    needs only ALTER on each view, for CREATE OR ALTER VIEW."""
+    new_tables = any(t not in present for t in TABLES)
+    new_views = any(v not in present for v in VIEWS)
+    needs = []
+    if new_tables:
+        needs.append(("CREATE TABLE", "HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','CREATE TABLE')"))
+    if new_views:
+        needs.append(("CREATE VIEW", "HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','CREATE VIEW')"))
+    if new_tables or new_views:
+        needs.append(("ALTER ON SCHEMA::dbo", "HAS_PERMS_BY_NAME('dbo','SCHEMA','ALTER')"))
+    else:
+        needs += [("ALTER ON dbo.%s" % v, "HAS_PERMS_BY_NAME('dbo.%s','OBJECT','ALTER')" % v)
+                  for v in VIEWS]
+    return needs
+
+
+def missing_ddl(present):
+    """schema.sql rights the RUNNING login lacks -- one by one, so a partial
+    grant says what is still missing."""
+    needs = schema_needs(present)
+    checks = " UNION ALL ".join("SELECT '%s' AS need, %s AS has" % n for n in needs)
+    lacking = set(need for need, has in query(checks) if has != 1)
+    return [need for need, _ in needs if need in lacking]
+
+
+def ddl_message(lacking):
+    return ("This account lacks %s, which 'schema' needs. A DBA runs this in %s, then run "
+            "'schema' (or the DBA runs schema.sql itself):\n%s"
+            % (", ".join(lacking), DB_NAME, grant_lines(lacking)))
+
+
+def explicit_ddl_grants():
+    """REVOKEs for the schema-only rights granted to this user directly. The
+    collector needs none of them, and ALTER on dbo reaches every object in it."""
+    rows = query("SELECT permission_name, class FROM sys.database_permissions "
+                 "WHERE grantee_principal_id = USER_ID() AND state IN ('G', 'W') "
+                 "AND ((class = 0 AND permission_name IN ('CREATE TABLE', 'CREATE VIEW')) "
+                 "OR (class = 3 AND major_id = SCHEMA_ID('dbo') AND permission_name = 'ALTER'))")
+    user = str(scalar("SELECT USER_NAME()")).replace("]", "]]")
+    return ["    REVOKE %s%s FROM [%s];" % (perm, " ON SCHEMA::dbo" if cls == 3 else "", user)
+            for perm, cls in sorted(rows, key=lambda r: (r[1], r[0]))]
+
+
+def dml_rights(lacking):
+    """missing_dml() output as grantable rights, one per table:
+    ['SELECT on t', 'INSERT on t'] -> ['SELECT, INSERT ON dbo.t']."""
+    by_table = {}
+    for need in lacking:
+        perm, _, table = need.partition(" on ")
+        by_table.setdefault(table, []).append(perm)
+    return ["%s ON dbo.%s" % (", ".join(p), t) for t, p in by_table.items()]
+
+
+def grant_lines(rights):
+    """The GRANTs that give the running login's database user `rights`, ready
+    for a DBA to paste into SSMS."""
+    user = str(scalar("SELECT USER_NAME()")).replace("]", "]]")
+    return "\n".join("    GRANT %s TO [%s];" % (r, user) for r in rights)
 
 
 def is_running_login(name):
@@ -475,34 +539,48 @@ def _database_checks():
     who = scalar("SELECT SUSER_NAME() + ' / ' + USER_NAME() + ' @ ' + DB_NAME()")
     info("identity: %s" % who)
 
-    # What schema.sql actually needs: creating in dbo takes ALTER on the schema
-    # as well as CREATE TABLE, and the views need CREATE VIEW.
-    if scalar("SELECT CASE WHEN HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','CREATE TABLE') = 1 "
-              "AND HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','CREATE VIEW') = 1 "
-              "AND HAS_PERMS_BY_NAME('dbo','SCHEMA','ALTER') = 1 THEN 1 ELSE 0 END") == 1:
-        ok("can create tables and views in dbo (needed by 'schema')")
+    present = existing_objects()
+    tables = [t for t in TABLES if t in present]
+    views = [v for v in VIEWS if v in present]
+    info("gw_login objects: %d of %d tables, %d of %d views%s" % (
+        len(tables), len(TABLES), len(views), len(VIEWS),
+        "" if present else "  (normal before 'schema' has run)"))
+
+    lacking_ddl = missing_ddl(present)
+    if len(tables) < len(TABLES):
+        # 'schema' is still to run, so a missing right is in the way.
+        if lacking_ddl:
+            soft(ddl_message(lacking_ddl))
+        else:
+            ok("can create the tables and views in dbo (needed by 'schema')")
     else:
-        soft("This account cannot create tables and views in dbo (needs CREATE TABLE, "
-             "CREATE VIEW and ALTER on SCHEMA::dbo). A DBA must run schema.sql once.")
-    # What grants.sql needs: create users, and grant on dbo objects.
+        if len(views) < len(VIEWS):
+            info("Only %d of %d views are visible to this account: either 'schema' stopped "
+                 "partway (re-run it), or its CREATE/ALTER rights were revoked after 'schema', "
+                 "which hides the views from it. The collector doesn't use them; Grafana reads "
+                 "them with its own login." % (len(views), len(VIEWS)))
+        if lacking_ddl:
+            info("Re-running 'schema' -- only needed when schema.sql changes -- would need "
+                 "%s:\n%s" % (", ".join(lacking_ddl), grant_lines(lacking_ddl)))
+        else:
+            ok("can re-run 'schema'")
+
+    # What grants.sql needs: create users, and grant on dbo objects. Only for
+    # Grafana's read-only login -- the collector never needs it.
     if scalar("SELECT CASE WHEN HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','ALTER ANY USER') = 1 "
               "AND (HAS_PERMS_BY_NAME('dbo','SCHEMA','CONTROL') = 1 "
               "OR IS_ROLEMEMBER('db_securityadmin') = 1) THEN 1 ELSE 0 END") == 1:
         ok("can create database users and grant on dbo (needed by 'grants')")
     else:
-        soft("This account cannot create database users and grant on dbo, so 'grants' will "
-             "fail -- a DBA must run grants.sql.")
-
-    present = existing_objects()
-    info("gw_login objects present: %d of %d%s" % (
-        len(present), len(EXPECTED_OBJECTS),
-        "" if present else "  (normal before 'schema' has run)"))
+        info("'grants' sets up Grafana's read-only login, which takes creating a database "
+             "user -- a right this account doesn't have, and doesn't need. Skip 'grants'; a "
+             "DBA runs section 2 of grants.sql when Grafana is connected.")
     if all(t in present for t, _ in COLLECTOR_DML):
         lacking = missing_dml()
         if lacking:
             blocker("collector", "The collector runs as '%s', which lacks: %s. A DBA must grant "
-                                 "these (or run grants.sql with this login as CollectorLogin)."
-                    % (DB_USER or who, ", ".join(lacking)))
+                                 "these (or run grants.sql with this login as CollectorLogin):\n%s"
+                    % (DB_USER or who, ", ".join(lacking), grant_lines(dml_rights(lacking))))
         else:
             ok("the collector's login can read and write all three tables")
 
@@ -537,10 +615,18 @@ def main():
     ap.add_argument("--sql-root", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), os.pardir, "sql"))
     args = ap.parse_args()
+    # Pipeline parameters: 'none' (their default) means blank.
+    args.grafana_login = param(args.grafana_login)
+    args.collector_login = param(args.collector_login)
 
     if not DB_SERVER or not DB_NAME:
         raise SystemExit("DB_SERVER and DB_NAME must be set. Is the DB variable group "
                          "linked to this pipeline?")
+    # Before touching anything, so 'all' can't stop halfway for want of it.
+    if args.action in ("grants", "all") and not args.grafana_login:
+        raise SystemExit("'%s' needs the Grafana read-only SQL login, and grafanaLogin is not set. "
+                         "Create that login first; it must never be the collector's account."
+                         % args.action)
 
     print("Action           : %s" % args.action)
     print("Database         : %s / %s" % (DB_SERVER, DB_NAME))
@@ -556,6 +642,9 @@ def main():
 
     if args.action in ("schema", "all"):
         section("Apply schema")
+        lacking_ddl = missing_ddl(existing_objects())
+        if lacking_ddl:
+            raise SystemExit(ddl_message(lacking_ddl))
         run_sql_file(os.path.join(args.sql_root, "schema.sql"))
         present = existing_objects()
         missing = [n for n in EXPECTED_OBJECTS if n not in present]
@@ -564,17 +653,20 @@ def main():
         ok("all %d objects present: %s" % (len(present), ", ".join(present)))
         lacking = missing_dml()
         if lacking:
-            soft("Tables created, but this login lacks %s on them -- creating a table in dbo "
-                 "does not make you its owner. 'grants' will stop on this; a DBA must grant them."
-                 % ", ".join(lacking))
+            soft("Tables created, but this login lacks %s -- creating a table in dbo does not "
+                 "make you its owner. The collector needs them; a DBA runs this in %s:\n%s"
+                 % (", ".join(lacking), DB_NAME, grant_lines(dml_rights(lacking))))
+        revokes = explicit_ddl_grants()
+        if revokes:
+            info("Done with the CREATE/ALTER rights: the collector doesn't need them, and ALTER "
+                 "on dbo reaches every object in it. After the DML rights above are in place, "
+                 "a DBA can revoke them (re-grant only when schema.sql changes):\n%s"
+                 % "\n".join(revokes))
 
     if args.action in ("grants", "all"):
         section("Apply grants")
         running_as = scalar("SELECT SUSER_NAME()")
         collector = args.collector_login or DB_USER or running_as
-        if not args.grafana_login:
-            raise SystemExit("grants needs --grafana-login. Create a read-only SQL login "
-                             "for Grafana first; it must never be the collector's account.")
         if args.grafana_login.lower() == (collector or "").lower():
             raise SystemExit("Grafana and collector logins are the same account. Grafana "
                              "must be read-only: panels run ad-hoc SQL that any dashboard "
@@ -593,9 +685,8 @@ def main():
             if lacking:
                 raise SystemExit(
                     "'%s' runs this pipeline and the collector, but lacks: %s. It cannot grant "
-                    "these to itself -- a DBA must, e.g. add it to db_datareader and "
-                    "db_datawriter, or GRANT them on the three gw_login tables."
-                    % (collector, ", ".join(lacking)))
+                    "these to itself -- a DBA runs this in %s:\n%s"
+                    % (collector, ", ".join(lacking), DB_NAME, grant_lines(dml_rights(lacking))))
             ok("collector login '%s' already has every right it needs" % collector)
 
     if args.action in ("verify", "all"):

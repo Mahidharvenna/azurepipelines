@@ -37,7 +37,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
 from gwcommon import (env, env_bool, harden_stdio, explain_import_error, parse_server,
                       explain_connect_error, loki_ssl_context, is_cert_error, LOKI_CERT_HINT,
-                      connect_sql, apply_session_options, tds_probe)
+                      connect_sql, apply_session_options, tds_probe, param)
 
 harden_stdio()
 
@@ -88,8 +88,9 @@ PRODUCTS = [p.lower() for p in split_list(env("PRODUCTS", "pc"))]
 
 LOOKBACK_DAYS = int(env("LOOKBACK_DAYS", "7"))
 RETENTION_DAYS = int(env("LOKI_RETENTION_DAYS", "30"))
-BACKFILL_START = env("BACKFILL_START").strip()
-BACKFILL_END = env("BACKFILL_END").strip()
+# Pipeline parameters: 'none' (their default) means blank.
+BACKFILL_START = param(env("BACKFILL_START"))
+BACKFILL_END = param(env("BACKFILL_END"))
 DRY_RUN = env_bool("DRY_RUN", False)
 ALLOW_ZERO_OVERWRITE = env_bool("ALLOW_ZERO_OVERWRITE", False)
 STORE_USERNAMES = env_bool("STORE_USERNAMES", True)

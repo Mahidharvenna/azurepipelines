@@ -15,7 +15,15 @@ GROUP BY env, product
 ORDER BY env, product;
 
 PRINT '--- 2. Freshness (expect days_behind = 1 in steady state) ------------';
-SELECT * FROM dbo.gw_login_freshness ORDER BY days_behind DESC, env;
+-- gw_login_freshness's query, run on the table: the pipeline's account may
+-- hold rights on the three tables only, and SQL Server checks SELECT on a view
+-- itself. Keep in step with the view in schema.sql.
+SELECT env, product,
+       MAX([day]) AS last_day,
+       DATEDIFF(DAY, MAX([day]), CAST(SYSUTCDATETIME() AS DATE)) AS days_behind
+FROM dbo.gw_login_daily
+GROUP BY env, product
+ORDER BY days_behind DESC, env;
 
 PRINT '--- 3. Gaps: missing days inside the stored range --------------------';
 -- Any row here is a day the collector never wrote. Still inside Loki retention?

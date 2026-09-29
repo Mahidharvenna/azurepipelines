@@ -36,15 +36,18 @@ parameters:
     - verify     # run the checks and print every result set
     - all        # check, schema, grants, verify
 
+# Optional text parameters default to 'none', not '': this ADO Server's Run
+# dialog marks a text parameter with an empty default as Required and won't
+# start until something is typed. setup.py reads 'none' as blank.
 - name: grafanaLogin
-  displayName: 'Grafana read-only SQL login (required for grants/all)'
+  displayName: 'Grafana read-only SQL login (grants/all only; none = not set)'
   type: string
-  default: ''
+  default: none
 
 - name: collectorLogin
-  displayName: 'Collector SQL login (blank = use DBUSER)'
+  displayName: 'Collector SQL login (none = use DBUSER)'
   type: string
-  default: ''
+  default: none
 
 # ADO Server 2022 RTW rejects a template expression on pool.name, so this is a
 # literal. Demands are fine under a literal name.

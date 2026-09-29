@@ -22,12 +22,13 @@
 GO
 
 -- --- 1. Collector: read + write ---------------------------------------------
--- Skipped when the collector IS the account running this script -- the usual
--- case, since that account just created the tables. SQL Server refuses a GRANT
--- to yourself, and if the account owns the database its user is 'dbo', so
--- CREATE USER would fail too. It already has every right below.
+-- Skipped when the collector IS the account running this script: SQL Server
+-- refuses a GRANT to yourself, and if the account owns the database its user
+-- is 'dbo', so CREATE USER would fail too. It must then already have the rights
+-- below -- from db_owner, db_datareader + db_datawriter, or a DBA's GRANTs.
+-- Creating the tables does NOT give them: dbo owns tables made in dbo.
 IF SUSER_NAME() = N'$(CollectorLogin)'
-    PRINT 'Collector login $(CollectorLogin) is running this script and already has these rights -- skipped.';
+    PRINT 'Collector login $(CollectorLogin) is running this script and cannot grant to itself -- skipped. It needs SELECT/INSERT/UPDATE on the three tables (+ DELETE on gw_login_user_daily) from a DBA.';
 ELSE IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'$(CollectorLogin)')
     CREATE USER [$(CollectorLogin)] FOR LOGIN [$(CollectorLogin)];
 GO

@@ -20,15 +20,18 @@ pr: none
 name: 'GW-LoginCollector-$(Date:yyyyMMdd).$(Rev:r)'
 
 parameters:
-# Seed history at go-live, or repair a gap. Blank = normal daily mode.
+# Seed history at go-live, or repair a gap. 'none' = normal daily mode.
+# Defaults are 'none', not '': this ADO Server's Run dialog marks a text
+# parameter with an empty default as Required and won't start until something
+# is typed. The collector reads 'none' as blank; scheduled runs get 'none' too.
 - name: backfillStart
-  displayName: 'Backfill start (YYYY-MM-DD). Blank for a normal daily run.'
+  displayName: 'Backfill start (YYYY-MM-DD). none = normal daily run.'
   type: string
-  default: ''
+  default: none
 - name: backfillEnd
-  displayName: 'Backfill end (YYYY-MM-DD). Blank means yesterday.'
+  displayName: 'Backfill end (YYYY-MM-DD). none = yesterday.'
   type: string
-  default: ''
+  default: none
 - name: dryRun
   displayName: 'Dry run -- query Loki, write nothing to the database'
   type: boolean
