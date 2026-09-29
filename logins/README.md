@@ -40,6 +40,7 @@ nobody purges.
 | `tools/setup.py` | What that pipeline runs: pre-flight, schema, grants, verify. |
 | `tools/prepare_python.sh` | Both pipelines' Python step on the Linux agent: picks Python, builds a job venv, installs `pymssql`. |
 | `tools/gwcommon.py` | Config, SQL Server connection and TLS helpers shared by the collector and `setup.py`. |
+| `tools/wheels/` | `pymssql` wheels for Linux Python 3.12 and 3.9, installed without network. |
 | `sql/schema.sql` | Tables and views. Idempotent. |
 | `sql/grants.sql` | Least-privilege grants (collector r/w, Grafana read-only). |
 | `sql/verify.sql` | Coverage, freshness, gaps, per-user reconciliation. |
@@ -147,9 +148,10 @@ agent needs the following — usually already there; details in
 - **Python 3.9+** with the `venv` module. `UsePythonVersion@0` only searches the
   agent's tool cache and fails on self-hosted agents, so `prepare_python.sh`
   tries each `python3.x` on `PATH`, newest first, until one can build a venv.
-- **A route to PyPI**, or an internal mirror (`PIP_INDEX_URL`), to install
-  `pymssql` into that job-local venv — which also sidesteps PEP 668 on newer
-  Debian/Ubuntu and RHEL 8's too-old system pip.
+- **Nothing from PyPI** for Python 3.12 or 3.9: `pymssql` installs from the
+  wheels in `tools/wheels/` into the job-local venv (which also sidesteps PEP
+  668 on newer Debian/Ubuntu). Any other Python falls back to PyPI or a mirror
+  (`PIP_INDEX_URL`).
 - **No SQL Server driver.** `pymssql`'s Linux wheel carries its own SQL Server
   client (FreeTDS compiled in, plus OpenSSL and Kerberos), the way .NET's
   `System.Data.SqlClient` does for PowerShell tasks — nothing needs root.

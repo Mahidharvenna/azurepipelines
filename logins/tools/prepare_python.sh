@@ -93,6 +93,7 @@ for PY in $CANDIDATES; do
   rm -rf "$VENV"
   if "$PY" -m venv "$VENV" >"$WORK/gwpy-venv.log" 2>&1; then
     VPY="$VENV/bin/python"
+    PYV="$("$VPY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
     echo "Using $("$PY" --version 2>&1) ($PY)"
     break
   fi
@@ -109,22 +110,53 @@ fi
 
 # ---- 3. pymssql ------------------------------------------------------------
 # Pinned: the Linux wheel bundles FreeTDS, OpenSSL and Kerberos, so this one
-# package is the entire SQL Server client. 2.3.13 rather than the newest 2.4.x,
-# which is weeks old.
+# package is the entire SQL Server client.
+#
+# Installed from the wheels committed next to this script first -- the build
+# agent has no route to PyPI, and a pip that can't connect spends minutes
+# retrying before it gives up. Only if none of those wheels fits this Python
+# does it try an index, and then only after a quick check that it's reachable.
 PYMSSQL="pymssql==2.3.13"
-PIP_OPTS="--disable-pip-version-check --retries 2 --timeout 30"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WHEELS="${GW_WHEELS_DIR:-$HERE/wheels}"          # overridable for tests only
 import_pymssql() {
   "$VPY" -c 'import pymssql; print("pymssql %s  (%s)" % (pymssql.__version__, pymssql.__file__))' 2>"$WORK/gwpy-import.err"
 }
+index_reachable() {
+  # A proxy or a private index can't be probed reliably from here -- let pip try.
+  if [ -n "${PIP_INDEX_URL:-}${HTTPS_PROXY:-}${https_proxy:-}" ]; then return 0; fi
+  "$VPY" - <<'PY' 2>/dev/null
+import sys, urllib.request
+try:
+    urllib.request.urlopen("https://pypi.org/simple/pymssql/", timeout=10).read(1)
+except Exception as ex:
+    print("    PyPI unreachable: %s" % ex)
+    sys.exit(1)
+PY
+}
 
-echo "Installing $PYMSSQL into $VENV ..."
-# A current pip first: an old one can't read manylinux_2_28 wheels.
-"$VPY" -m pip install $PIP_OPTS --upgrade pip >"$WORK/gwpy-pip.log" 2>&1 || true
-if "$VPY" -m pip install $PIP_OPTS --only-binary=:all: "$PYMSSQL" >>"$WORK/gwpy-pip.log" 2>&1; then
+installed=""
+if [ -d "$WHEELS" ] && ls "$WHEELS"/*.whl >/dev/null 2>&1; then
+  echo "Installing $PYMSSQL from $WHEELS (no network) ..."
+  if "$VPY" -m pip install --disable-pip-version-check --no-index --find-links "$WHEELS" \
+       "$PYMSSQL" >"$WORK/gwpy-pip.log" 2>&1; then
+    installed=local
+  else
+    echo "    no wheel there fits this Python ($PYV) -- trying a package index"
+  fi
+fi
+if [ -z "$installed" ]; then
+  if index_reachable; then
+    echo "Installing $PYMSSQL from ${PIP_INDEX_URL:+your PIP_INDEX_URL}${PIP_INDEX_URL:-PyPI} ..."
+    "$VPY" -m pip install --disable-pip-version-check --retries 1 --timeout 20 \
+         --only-binary=:all: "$PYMSSQL" >>"$WORK/gwpy-pip.log" 2>&1 && installed=index
+    [ -n "$installed" ] || tail -n 15 "$WORK/gwpy-pip.log"
+  fi
+fi
+if [ -n "$installed" ]; then
   import_pymssql || warn "pymssql installed but failed to import: $(tail -n 1 "$WORK/gwpy-import.err")"
 else
-  tail -n 15 "$WORK/gwpy-pip.log"
-  warn "pip could not install $PYMSSQL (above). No route to PyPI? Set PIP_INDEX_URL (an internal PyPI mirror; may be a secret) or HTTPS_PROXY in the variable group."
+  warn "Could not install $PYMSSQL: no wheel in $WHEELS fits Python $PYV, and no package index is reachable. Add a matching wheel there (see its README), or set PIP_INDEX_URL (an internal mirror; may be a secret) or HTTPS_PROXY in the variable group."
 fi
 
 echo "##vso[task.setvariable variable=PYTHON_EXE]$VPY"

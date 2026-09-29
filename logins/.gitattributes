@@ -2,3 +2,6 @@
 # ("$'\r': command not found"). Keep shell scripts LF however they are edited
 # or committed, including from Windows with core.autocrlf=true.
 *.sh text eol=lf
+
+# Vendored Python wheels: never let git touch their bytes.
+*.whl binary

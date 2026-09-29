@@ -34,7 +34,7 @@ file it needs is committed.
 | Needs | Why | Without it |
 |---|---|---|
 | Python **3.9+** with its `venv` module | runs the scripts; job-local installs (system pip is blocked by PEP 668 on newer Debian/Ubuntu and too old on RHEL 8) | `Prepare Python` fails and names the fix |
-| A route to PyPI, **or** an internal mirror | installs `pymssql` into the job's venv each run | `Prepare Python` warns; `check` fails. See 0.3 |
+| Python **3.12 or 3.9** — or else a route to a package index | `pymssql` is installed from wheels committed in `tools/wheels/` (Linux x86_64, Python 3.12 and 3.9), no network needed; any other Python version falls back to PyPI or a mirror | `Prepare Python` warns; `check` fails. See 0.3 |
 | Network to Loki and SQL Server | the job itself | `check` names which one |
 
 **No SQL Server driver is needed.** `pymssql`'s Linux wheel carries its own
@@ -58,10 +58,11 @@ sudo apt-get update && sudo apt-get install -y python3 python3-venv
 instead; `Prepare Python` picks the newest version on `PATH`. Debian 10 and
 older have no 3.9 package and are past end of life.
 
-### 0.3 No route to PyPI?
+### 0.3 Python other than 3.12 or 3.9, and no route to PyPI?
 
-The job installs `pymssql` into a fresh venv each run. If the agent can't reach
-PyPI:
+`pymssql` is installed from the wheels in `tools/wheels/`, so a Python 3.12 or
+3.9 agent needs no network at all. For another version, either add its wheel
+there (the folder's README says how), or give the job an index:
 
 - add **`PIP_INDEX_URL`** (an internal PyPI mirror — Nexus, Artifactory, an Azure
   Artifacts feed) to `gw-reports-secrets`. If the URL carries a token, make it a
@@ -168,7 +169,7 @@ override it:
 |---|---|---|
 | `DB_ENCRYPT` | `true` | The server can't negotiate TLS. `check` detects it and says so. `false` matches a default SqlClient connection, which is unencrypted. The certificate is never verified either way. |
 | `LOKI_CA_BUNDLE` | — | Loki uses an internal CA and you can't add it to the OS store. Path to a `.pem` on the agent. |
-| `PIP_INDEX_URL` / `HTTPS_PROXY` | — | The agent can't reach PyPI (0.3). |
+| `PIP_INDEX_URL` / `HTTPS_PROXY` | — | Only for a Python other than 3.12 / 3.9 on an agent without PyPI (0.3). |
 | `DB_TRUSTED_CONNECTION` | `false` | Leave it. On Linux it means Kerberos and needs a ticket for the agent account. |
 | `LOOKBACK_DAYS` | `7` | Longer self-healing window. |
 | `LOKI_RETENTION_DAYS` | `30` | Your Loki keeps more or less. |
@@ -388,7 +389,7 @@ exists; two prove the *only if source changed* box is unticked.
 | `No agent found in pool DevopsAutomation which satisfies the specified demands` | no online Linux agent in that pool | bring one online, or check the agent's `Agent.OS` capability |
 | `No Python >= 3.9 found` | Python missing or too old, or outside the agent's `.path` | 0.2, then 0.5 |
 | `None of the Python interpreters above could create a virtualenv` | Debian/Ubuntu without `python3-venv` | 0.2 |
-| `pip could not install pymssql==…` | no route to PyPI | 0.3 |
+| `Could not install pymssql==…: no wheel in … fits Python …` | the agent's Python isn't 3.12 or 3.9, and no index is reachable | 0.3 |
 | `pymssql is not installed` | the install step failed — see its warnings | 0.3 |
 | `accepted the connection but never answered SQL Server's handshake` | a firewall or proxy swallows the traffic, or it isn't SQL Server | check the path to `DBINSTANCE`; `pymssql` would have hung here |
 | `Confirmed: it connects unencrypted` | the server can't negotiate TLS | `DB_ENCRYPT=false` in `gw-reports-secrets`, or enable TLS on the server |
