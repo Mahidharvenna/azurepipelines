@@ -52,18 +52,19 @@ parameters:
 #
 # Pinned to Linux: the steps below are bash, and the ODBC driver is installed
 # per machine, so the setup 'check' and the daily collector must land on the
-# same kind of agent. If 'Default' holds more than one Linux agent, either give
+# same kind of agent. If 'DevopsAutomation' holds more than one Linux agent, either give
 # every one of them the prerequisites (DEPLOY.md) or pin the one that has them:
 #   - Agent.Name -equals <agent-name>
 pool:
-  name: Default
+  name: DevopsAutomation
   demands:
   - Agent.OS -equals Linux
 
 variables:
-# Database credentials. Point this at your existing DB variable group; the env
-# block below maps its names. Needs DBINSTANCE, DBNAME, DBUSER, DBPASS.
-- group: 'gw-logins-db'
+# Database credentials: the existing 'Dashboard DB' group, used as-is rather
+# than copied, so the password lives in one place. The env block below maps
+# its names. Needs DBINSTANCE, DBNAME, DBUSER, DBPASS.
+- group: 'Dashboard DB'
 # Shared with reports/gw-monthly-login-report.yaml ON PURPOSE. LOKI_PROJECT,
 # LOGIN_USER_REGEX, REPORT_TIMEZONE, ENVS and PRODUCT_JOBS must be identical in
 # both jobs or the dashboard silently stops reconciling with the spreadsheet --

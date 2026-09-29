@@ -3,7 +3,8 @@
 From an empty database to a Grafana dashboard with seeded history and a daily
 pipeline keeping it current.
 
-Both pipelines run on **Linux agents only** (`demands: Agent.OS -equals Linux`).
+Both pipelines run in the **`DevopsAutomation`** agent pool, on **Linux agents
+only** (`demands: Agent.OS -equals Linux`).
 Everything is additive — rollback is at the bottom and takes two minutes.
 
 The order matters: the setup pipeline needs the variable groups, and the
@@ -136,7 +137,7 @@ sudo ./svc.sh stop && sudo ./svc.sh start
 
 `Prepare Python` prints the `PATH` it actually sees, so you can check.
 
-### 0.7 More than one Linux agent in `Default`?
+### 0.7 More than one Linux agent in `DevopsAutomation`?
 
 The demand only guarantees *a* Linux agent. If there are several, either give
 every one of them the prerequisites, or pin both pipelines to the one that has
@@ -165,9 +166,9 @@ If it isn't backed up, pick a database that is, or add a periodic export of
 
 Both pipelines read two groups. Neither needs creating from scratch.
 
-**`gw-logins-db`** — the database credential. Point it at your existing DB group
-by editing the `- group:` line in both YAMLs; it must supply `DBINSTANCE`,
-`DBNAME`, `DBUSER` and `DBPASS` (secret). `DBINSTANCE` takes SQL Server's own
+**`Dashboard DB`** — the existing database credential group, used as-is so the
+password lives in one place. It supplies `DBINSTANCE`, `DBNAME`, `DBUSER` and
+`DBPASS` (secret). `DBINSTANCE` takes SQL Server's own
 syntax — `host`, `host,port`, or `host\instance` — never `host:port`.
 
 **`gw-reports-secrets`** — the monthly report's group, **shared on purpose**.
@@ -413,7 +414,7 @@ exists; two prove the *only if source changed* box is unticked.
 | `Missing from the checked-out repo: …` | same, for the files named | same |
 | `Found N copies of tools/prepare_python.sh` | the folder exists twice | delete the stale copy, or set a pipeline variable `LOGINS_DIR` to the one to use |
 | `Unable to locate executable file: 'pwsh'` | a PowerShell step ran on a Linux agent | the `logins/` YAMLs are bash-only now — pull them. The monthly report's YAML still has a PowerShell step and fails the same way on a Linux agent |
-| `No agent found in pool Default which satisfies the specified demands` | no online Linux agent | bring one online, or check the agent's `Agent.OS` capability |
+| `No agent found in pool DevopsAutomation which satisfies the specified demands` | no online Linux agent in that pool | bring one online, or check the agent's `Agent.OS` capability |
 | `No Python >= 3.9 found` | Python missing or too old, or outside the agent's `.path` | 0.2 / 0.3, then 0.6 |
 | `None of the Python interpreters above could create a virtualenv` | Debian/Ubuntu without `python3-venv` | 0.3 |
 | `pip could not install pyodbc` | no route to PyPI | 0.4 |

@@ -140,7 +140,7 @@ thing that stays.
 
 ## Agent prerequisites
 
-Both pipelines run on **Linux agents** (`demands: Agent.OS -equals Linux`). The
+Both pipelines run in the `DevopsAutomation` pool on **Linux agents** (`demands: Agent.OS -equals Linux`). The
 agent needs, once, from an admin with root — exact commands in
 [`DEPLOY.md`](DEPLOY.md), phase 0:
 
