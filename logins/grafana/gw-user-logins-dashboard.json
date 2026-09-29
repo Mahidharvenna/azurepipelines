@@ -785,7 +785,7 @@
   },
   "timezone": "browser",
   "title": "Guidewire User Logins (historical)",
-  "uid": "gw-user-logins-hist",
+  "uid": "gw-user-logins-db",
   "version": 1,
   "weekStart": ""
 }

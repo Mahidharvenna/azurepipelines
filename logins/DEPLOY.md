@@ -370,7 +370,7 @@ rather than counts, because that's what usernames require.
    whatever SQL a panel holds, so with a login that can write — the
    collector's included — anyone who can edit a dashboard can delete history
    that Loki can no longer rebuild.
-2. **Dashboards → New → Import** → `grafana/gw-logins-dashboard.json` → pick
+2. **Dashboards → New → Import** → `grafana/gw-user-logins-dashboard.json` → pick
    that datasource. If `DBNAME` isn't `Dashboard`, set the hidden variable
    `db` to it: **Dashboard settings → Variables → db**.
 

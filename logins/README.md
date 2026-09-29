@@ -44,7 +44,7 @@ nobody purges.
 | `sql/schema.sql` | Tables and views. Idempotent. |
 | `sql/grants.sql` | Least-privilege grants (collector r/w, Grafana read-only). |
 | `sql/verify.sql` | Coverage, freshness, gaps, per-user reconciliation. |
-| `grafana/gw-logins-dashboard.json` | Importable dashboard, 10 panels. |
+| `grafana/gw-user-logins-dashboard.json` | Importable dashboard, 10 panels. |
 
 The folder can sit anywhere in your repo (`logins/`, `Grafana/logins/`, ...); each
 pipeline's first step locates it. Paths in these docs are relative to the folder.
