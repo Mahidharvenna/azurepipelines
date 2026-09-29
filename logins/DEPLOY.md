@@ -360,9 +360,12 @@ rather than counts, because that's what usernames require.
 ## Phase 5 — Grafana
 
 1. **Connections → Data sources → Add → Microsoft SQL Server**, using the
-   **read-only** login — never the collector's. Grafana's own host must reach
-   SQL Server on 1433; that's a different machine from the agent, so phase 2's
-   `check` doesn't cover it.
+   **read-only** login — never the collector's (section 2 of `grants.sql`
+   creates its rights). *Host* = the server in `DBINSTANCE` as `host:1433`,
+   *Database* = `DBNAME`. Don't reuse an existing SQL datasource: it usually
+   points at another database, and every panel then fails. Grafana's own host
+   must reach SQL Server on 1433; that's a different machine from the agent,
+   so phase 2's `check` doesn't cover it.
 2. **Dashboards → New → Import** → `grafana/gw-logins-dashboard.json` → pick
    that datasource.
 
@@ -448,6 +451,7 @@ exists; two prove the *only if source changed* box is unticked.
 | `Login failed for user` | wrong `DBUSER` / `DBPASS` | fix the DB variable group |
 | `older than 2016 SP1` | SQL Server too old for `CREATE OR ALTER` | use a newer instance |
 | Collector ran once, then never again | *Only schedule builds if the source … changed* is ticked | phase 3, step 2 |
+| Every Grafana panel: `Incorrect syntax near ')'`, and a ⚠ on the *Environment* / *Product* dropdowns | the dropdowns came back empty, so panels render `env IN ()`. The datasource can't read the tables — wrong database, or no `SELECT` — or they're still empty | hover the ⚠ on *Environment* for the real error; phase 5, step 1 |
 | Every count is 0 | `LOKI_PROJECT` / `ENVS` / `job` wrong | phase 4, test 1 |
 
 ---
