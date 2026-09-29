@@ -359,15 +359,20 @@ rather than counts, because that's what usernames require.
 
 ## Phase 5 — Grafana
 
-1. **Connections → Data sources → Add → Microsoft SQL Server**, using the
-   **read-only** login — never the collector's (section 2 of `grants.sql`
-   creates its rights). *Host* = the server in `DBINSTANCE` as `host:1433`,
-   *Database* = `DBNAME`. Don't reuse an existing SQL datasource: it usually
-   points at another database, and every panel then fails. Grafana's own host
-   must reach SQL Server on 1433; that's a different machine from the agent,
-   so phase 2's `check` doesn't cover it.
+1. **A datasource on the SQL Server in `DBINSTANCE`.** The panels name the
+   database themselves, so an existing datasource on that server works
+   whatever its own *Database* setting. A new one: **Connections → Data
+   sources → Add → Microsoft SQL Server**, *Host* `host:1433`. Grafana's own
+   host must reach SQL Server on 1433; that's a different machine from the
+   agent, so phase 2's `check` doesn't cover it.
+
+   **Prefer a read-only login** (section 2 of `grants.sql`). Grafana runs
+   whatever SQL a panel holds, so with a login that can write — the
+   collector's included — anyone who can edit a dashboard can delete history
+   that Loki can no longer rebuild.
 2. **Dashboards → New → Import** → `grafana/gw-logins-dashboard.json` → pick
-   that datasource.
+   that datasource. If `DBNAME` isn't `Dashboard`, set the hidden variable
+   `db` to it: **Dashboard settings → Variables → db**.
 
 Import *after* phase 4: the `Environment` and `Product` dropdowns are populated
 from the tables, and against empty tables they render as `IN ()`, which SQL
@@ -405,8 +410,10 @@ just stops growing, and past ~30 days the gap is permanent.
 
 - **Query A** (MSSQL, *Table* format):
   ```sql
-  SELECT ISNULL(MAX(days_behind), 9999) AS days_behind FROM dbo.gw_login_freshness;
+  SELECT ISNULL(MAX(days_behind), 9999) AS days_behind FROM [Dashboard].dbo.gw_login_freshness;
   ```
+  `Dashboard` is `DBNAME` — alert queries can't use the dashboard's `db`
+  variable, so it's spelled out.
 - **Condition**: `WHEN Last() OF A IS ABOVE 2`
 - **Evaluate** every `1h` for `2h`, routed somewhere a human reads.
 
@@ -451,7 +458,7 @@ exists; two prove the *only if source changed* box is unticked.
 | `Login failed for user` | wrong `DBUSER` / `DBPASS` | fix the DB variable group |
 | `older than 2016 SP1` | SQL Server too old for `CREATE OR ALTER` | use a newer instance |
 | Collector ran once, then never again | *Only schedule builds if the source … changed* is ticked | phase 3, step 2 |
-| Every Grafana panel: `Incorrect syntax near ')'`, and a ⚠ on the *Environment* / *Product* dropdowns | the dropdowns came back empty, so panels render `env IN ()`. The datasource can't read the tables — wrong database, or no `SELECT` — or they're still empty | hover the ⚠ on *Environment* for the real error; phase 5, step 1 |
+| Every Grafana panel: `Incorrect syntax near ')'`, and a ⚠ on the *Environment* / *Product* dropdowns | the dropdowns came back empty, so panels render `env IN ()`. The datasource can't read the tables — another server, no `SELECT`, or the dashboard's `db` variable isn't `DBNAME` — or they're still empty | hover the ⚠ on *Environment* for the real error; phase 5 |
 | Every count is 0 | `LOKI_PROJECT` / `ENVS` / `job` wrong | phase 4, test 1 |
 
 ---

@@ -44,7 +44,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT ISNULL(SUM(logins), 0) AS \"Total logins\"\nFROM dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
+          "rawSql": "SELECT ISNULL(SUM(logins), 0) AS \"Total logins\"\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
         }
       ],
       "options": {
@@ -97,7 +97,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT COUNT(DISTINCT username) AS \"Distinct users\"\nFROM dbo.gw_login_user_daily\nWHERE $__timeFilter(day_ts)\n    AND username <> '(unparsed)'\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
+          "rawSql": "SELECT COUNT(DISTINCT username) AS \"Distinct users\"\nFROM [${db}].dbo.gw_login_user_daily\nWHERE $__timeFilter(day_ts)\n    AND username <> '(unparsed)'\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
         }
       ],
       "options": {
@@ -150,7 +150,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT ISNULL(MAX(days_behind), 9999) AS \"Days behind\"\nFROM dbo.gw_login_freshness\nWHERE env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
+          "rawSql": "SELECT ISNULL(MAX(days_behind), 9999) AS \"Days behind\"\nFROM [${db}].dbo.gw_login_freshness\nWHERE env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
         }
       ],
       "options": {
@@ -226,7 +226,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT env, SUM(logins) AS logins\nFROM dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY env\nORDER BY SUM(logins) DESC;"
+          "rawSql": "SELECT env, SUM(logins) AS logins\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY env\nORDER BY SUM(logins) DESC;"
         }
       ],
       "options": {
@@ -287,7 +287,7 @@
           },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT day_ts AS time, env AS metric, SUM(logins) AS value\nFROM dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY day_ts, env\nORDER BY 1;"
+          "rawSql": "SELECT day_ts AS time, env AS metric, SUM(logins) AS value\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY day_ts, env\nORDER BY 1;"
         }
       ],
       "options": {
@@ -358,7 +358,7 @@
           },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT day_ts AS time, env AS metric, SUM(distinct_users) AS value\nFROM dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY day_ts, env\nORDER BY 1;"
+          "rawSql": "SELECT day_ts AS time, env AS metric, SUM(distinct_users) AS value\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY day_ts, env\nORDER BY 1;"
         }
       ],
       "options": {
@@ -429,7 +429,7 @@
           },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n    CAST(DATEFROMPARTS(YEAR([day]), MONTH([day]), 1) AS DATETIME2(0)) AS time,\n    env AS metric,\n    SUM(logins) AS value\nFROM dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY DATEFROMPARTS(YEAR([day]), MONTH([day]), 1), env\nORDER BY 1;"
+          "rawSql": "SELECT\n    CAST(DATEFROMPARTS(YEAR([day]), MONTH([day]), 1) AS DATETIME2(0)) AS time,\n    env AS metric,\n    SUM(logins) AS value\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY DATEFROMPARTS(YEAR([day]), MONTH([day]), 1), env\nORDER BY 1;"
         }
       ],
       "options": {
@@ -495,7 +495,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n    d.env                                            AS [Environment],\n    d.product                                        AS [Product],\n    SUM(d.logins)                                    AS [Logins],\n    COUNT(*)                                         AS [Days with data],\n    CAST(ROUND(AVG(CAST(d.logins AS FLOAT)), 0) AS INT) AS [Avg per day],\n    MAX(d.logins)                                    AS [Peak day],\n    MAX(d.[day])                                     AS [Last day]\nFROM dbo.gw_login_daily d\nWHERE $__timeFilter(d.day_ts)\n    AND d.env IN (${env:sqlstring})\n    AND d.product IN (${product:sqlstring})\nGROUP BY d.env, d.product\nORDER BY d.env, d.product;"
+          "rawSql": "SELECT\n    d.env                                            AS [Environment],\n    d.product                                        AS [Product],\n    SUM(d.logins)                                    AS [Logins],\n    COUNT(*)                                         AS [Days with data],\n    CAST(ROUND(AVG(CAST(d.logins AS FLOAT)), 0) AS INT) AS [Avg per day],\n    MAX(d.logins)                                    AS [Peak day],\n    MAX(d.[day])                                     AS [Last day]\nFROM [${db}].dbo.gw_login_daily d\nWHERE $__timeFilter(d.day_ts)\n    AND d.env IN (${env:sqlstring})\n    AND d.product IN (${product:sqlstring})\nGROUP BY d.env, d.product\nORDER BY d.env, d.product;"
         }
       ],
       "options": {
@@ -569,7 +569,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 25\n    username      AS [User],\n    SUM(logins)   AS [Logins],\n    COUNT(DISTINCT [day]) AS [Active days],\n    COUNT(DISTINCT env)   AS [Environments]\nFROM dbo.gw_login_user_daily\nWHERE $__timeFilter(day_ts)\n    AND username <> '(unparsed)'\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY username\nORDER BY SUM(logins) DESC;"
+          "rawSql": "SELECT TOP 25\n    username      AS [User],\n    SUM(logins)   AS [Logins],\n    COUNT(DISTINCT [day]) AS [Active days],\n    COUNT(DISTINCT env)   AS [Environments]\nFROM [${db}].dbo.gw_login_user_daily\nWHERE $__timeFilter(day_ts)\n    AND username <> '(unparsed)'\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY username\nORDER BY SUM(logins) DESC;"
         }
       ],
       "options": {
@@ -628,7 +628,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 20\n    started_at   AS [Started (UTC)],\n    status       AS [Status],\n    days_from    AS [From],\n    days_to      AS [To],\n    rows_written AS [Rows written],\n    query_errors AS [Query errors],\n    build_id     AS [Build],\n    detail       AS [Detail]\nFROM dbo.gw_login_collector_run\nORDER BY started_at DESC;"
+          "rawSql": "SELECT TOP 20\n    started_at   AS [Started (UTC)],\n    status       AS [Status],\n    days_from    AS [From],\n    days_to      AS [To],\n    rows_written AS [Rows written],\n    query_errors AS [Query errors],\n    build_id     AS [Build],\n    detail       AS [Detail]\nFROM [${db}].dbo.gw_login_collector_run\nORDER BY started_at DESC;"
         }
       ],
       "options": {
@@ -710,6 +710,27 @@
         "skipUrlSync": false
       },
       {
+        "name": "db",
+        "label": "Database",
+        "type": "constant",
+        "description": "Database holding the gw_login tables (DBNAME). Panels name it explicitly, so any datasource on that server works regardless of its own default database.",
+        "query": "Dashboard",
+        "hide": 2,
+        "skipUrlSync": true,
+        "current": {
+          "selected": false,
+          "text": "Dashboard",
+          "value": "Dashboard"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "Dashboard",
+            "value": "Dashboard"
+          }
+        ]
+      },
+      {
         "name": "env",
         "label": "Environment",
         "type": "query",
@@ -724,8 +745,8 @@
         "sort": 1,
         "current": {},
         "options": [],
-        "query": "SELECT DISTINCT env FROM dbo.gw_login_daily ORDER BY env;",
-        "definition": "SELECT DISTINCT env FROM dbo.gw_login_daily ORDER BY env;"
+        "query": "SELECT DISTINCT env FROM [${db}].dbo.gw_login_daily ORDER BY env;",
+        "definition": "SELECT DISTINCT env FROM [${db}].dbo.gw_login_daily ORDER BY env;"
       },
       {
         "name": "product",
@@ -742,8 +763,8 @@
         "sort": 1,
         "current": {},
         "options": [],
-        "query": "SELECT DISTINCT product FROM dbo.gw_login_daily ORDER BY product;",
-        "definition": "SELECT DISTINCT product FROM dbo.gw_login_daily ORDER BY product;"
+        "query": "SELECT DISTINCT product FROM [${db}].dbo.gw_login_daily ORDER BY product;",
+        "definition": "SELECT DISTINCT product FROM [${db}].dbo.gw_login_daily ORDER BY product;"
       }
     ]
   },
