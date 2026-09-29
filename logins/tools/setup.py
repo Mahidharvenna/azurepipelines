@@ -22,7 +22,8 @@ secret is ever passed as an argument (arguments are echoed in the build log).
 Actions
 -------
   check   pre-flight only. Touches nothing. The default, deliberately.
-  schema  apply sql/schema.sql (idempotent)
+  schema  apply sql/schema.sql (idempotent). Tables that predate the project
+          column get it, their rows tagged with LOKI_PROJECT.
   grants  apply sql/grants.sql  -- needs --grafana-login
   verify  run sql/verify.sql and print every result set
   all     check, schema, grants, verify -- in that order
@@ -32,6 +33,7 @@ import os
 import re
 import sys
 import json
+import time
 import socket
 import platform
 import argparse
@@ -68,6 +70,23 @@ LOKI_URL = env("LOKI_URL").rstrip("/")
 LOKI_VERIFY = env_bool("LOKI_VERIFY_TLS", True)
 LOKI_CA_BUNDLE = env("LOKI_CA_BUNDLE").strip()
 BYPASS_PROXY = env_bool("BYPASS_PROXY", True)
+
+# The Loki `project` label values the collector covers, read as it reads them:
+# unset means LOKI_PROJECT alone, the single project there was before.
+LOKI_PROJECT = env("LOKI_PROJECT").strip()
+LOKI_PROJECTS = ([p.strip() for p in env("LOKI_PROJECTS").split(",") if p.strip()]
+                 or ([LOKI_PROJECT] if LOKI_PROJECT else []))
+# The collector's rule for a project value: it goes inside a LogQL selector's
+# double quotes and into a VARCHAR(64) column.
+PROJECT_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def existing_project():
+    """The project that rows stored before the project column belong to:
+    LOKI_PROJECT, the only project the collector read until then -- whatever
+    order LOKI_PROJECTS lists projects in. The first LOKI_PROJECTS entry only
+    when LOKI_PROJECT is unset. '' when neither is set."""
+    return LOKI_PROJECT or (LOKI_PROJECTS[0] if LOKI_PROJECTS else "")
 
 
 # ---------------------------------------------------------------------------
@@ -167,20 +186,41 @@ def missing_dml():
     return [need for need, has in query(checks) if has != 1]
 
 
+def tables_missing_project(present):
+    """Existing tables without the project column -- created before it, so
+    schema.sql has to upgrade them and the collector refuses to write them."""
+    tables = [t for t in TABLES if t in present]
+    if not tables:
+        return []
+    checks = " UNION ALL ".join(
+        "SELECT '%s' AS name, COL_LENGTH('dbo.%s','project') AS len" % (t, t) for t in tables)
+    lacking = set(name for name, length in query(checks) if length is None)
+    return [t for t in tables if t in lacking]
+
+
 def schema_needs(present):
     """(right, HAS_PERMS_BY_NAME test) pairs that schema.sql needs, given the
     objects that already exist. Creating anything in dbo takes ALTER on the
-    schema as well as CREATE TABLE / CREATE VIEW. Once everything exists a
-    re-run creates nothing -- its CREATE TABLEs and indexes are guarded -- and
-    needs only ALTER on each view, for CREATE OR ALTER VIEW."""
+    schema as well as CREATE TABLE / CREATE VIEW, and so does adding the
+    project column: ALTER on dbo covers the ALTER TABLEs, the rebuilt keys and
+    indexes, and the views. Once everything is in place a re-run creates
+    nothing -- its CREATE TABLEs and indexes are guarded -- and needs only
+    ALTER on each view, for CREATE OR ALTER VIEW."""
     new_tables = any(t not in present for t in TABLES)
-    new_views = any(v not in present for v in VIEWS)
+    # With every table in place, views it can't see are almost always views it
+    # can no longer see -- its ALTER on dbo was revoked after 'schema' -- and
+    # ALTER on dbo alone brings them back. Asking for CREATE VIEW too would have
+    # a DBA grant a right that isn't needed. (If they truly are missing,
+    # schema.sql's CREATE OR ALTER VIEW says so plainly.)
+    views_hidden = any(v not in present for v in VIEWS)
+    new_views = views_hidden and new_tables
+    upgrade = bool(tables_missing_project(present))
     needs = []
     if new_tables:
         needs.append(("CREATE TABLE", "HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','CREATE TABLE')"))
     if new_views:
         needs.append(("CREATE VIEW", "HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','CREATE VIEW')"))
-    if new_tables or new_views:
+    if new_tables or views_hidden or upgrade:
         needs.append(("ALTER ON SCHEMA::dbo", "HAS_PERMS_BY_NAME('dbo','SCHEMA','ALTER')"))
     else:
         needs += [("ALTER ON dbo.%s" % v, "HAS_PERMS_BY_NAME('dbo.%s','OBJECT','ALTER')" % v)
@@ -201,6 +241,28 @@ def ddl_message(lacking):
     return ("This account lacks %s, which 'schema' needs. A DBA runs this in %s, then run "
             "'schema' (or the DBA runs schema.sql itself):\n%s"
             % (", ".join(lacking), DB_NAME, grant_lines(lacking)))
+
+
+NO_PROJECT_COLUMN = "The login tables have no project column yet"
+
+
+def upgrade_message(missing):
+    """What to do about tables that predate the project column."""
+    project = existing_project()
+    if not project:
+        return ("%s (%s), and the collector refuses to run against them. Set LOKI_PROJECT to "
+                "the project their rows came from, then run 'schema' to add the column -- it "
+                "tags those rows with it." % (NO_PROJECT_COLUMN, ", ".join(missing)))
+    rows = ""
+    if "gw_login_daily" in missing:
+        try:
+            rows = " (%s in gw_login_daily)" % scalar(
+                "SELECT COUNT_BIG(*) FROM dbo.gw_login_daily")
+        except SystemExit:
+            pass        # no SELECT on it: the count is only a courtesy
+    return ("%s (%s), and the collector refuses to run against them. Run 'schema' to add the "
+            "project column; the existing rows%s are tagged '%s' -- LOKI_PROJECT, else the first "
+            "LOKI_PROJECTS entry." % (NO_PROJECT_COLUMN, ", ".join(missing), rows, project))
 
 
 def explicit_ddl_grants():
@@ -254,9 +316,11 @@ GO_RE = re.compile(r'(?im)^[ \t]*GO[ \t]*$')
 PRINT_RE = re.compile(r"^\s*PRINT\s+'(.*?)'\s*;?\s*$", re.IGNORECASE)
 
 
-def expand_setvar(text, overrides=None):
+def expand_setvar(text, overrides=None, placeholder_ok=()):
     """Resolve :setvar declarations and $(TOKEN) references, then drop the
-    :setvar lines. Overrides (from the command line) win over the file."""
+    :setvar lines. Overrides (from the command line) win over the file.
+    placeholder_ok names variables the SQL checks itself, only where it needs
+    them -- schema.sql's ExistingProject matters only to an upgrade."""
     variables = {}
     for line in text.split("\n"):
         m = SETVAR_RE.match(line)
@@ -266,7 +330,7 @@ def expand_setvar(text, overrides=None):
         if v:
             variables[k] = v
     for k, v in variables.items():
-        if v.startswith("your_"):
+        if v.startswith("your_") and k not in placeholder_ok:
             raise SystemExit("%s is still the placeholder '%s' -- pass the real value." % (k, v))
     kept = [l for l in text.split("\n") if not re.match(r"^\s*:setvar\s", l)]
     out = "\n".join(kept)
@@ -326,11 +390,11 @@ def print_table(cursor):
     return len(rows)
 
 
-def run_sql_file(path, overrides=None, show_results=False):
+def run_sql_file(path, overrides=None, show_results=False, placeholder_ok=()):
     if not os.path.isfile(path):
         raise SystemExit("SQL file not found: %s" % path)
     info("file: %s" % path)
-    text = expand_setvar(open(path, encoding="utf-8-sig").read(), overrides)
+    text = expand_setvar(open(path, encoding="utf-8-sig").read(), overrides, placeholder_ok)
     batches = split_batches(text)
     info("%d batch(es)" % len(batches))
 
@@ -387,6 +451,27 @@ def version_tuple(text):
     return tuple(int(x) for x in re.findall(r"\d+", str(text))[:3])
 
 
+def check_loki_projects(opener):
+    """LOKI_PROJECTS against the project values Loki actually has -- a typo
+    there leaves that project with no data, or with zeros, and nothing else
+    says why. Over the last 30 days, as the collector's env discovery asks:
+    Loki's default is 6 hours, and a quiet project would look missing."""
+    end = int(time.time()) * 10 ** 9
+    qs = urllib.parse.urlencode({"start": end - 30 * 86400 * 10 ** 9, "end": end})
+    try:
+        with opener.open(LOKI_URL + "/loki/api/v1/label/project/values?" + qs,
+                         timeout=30) as r:
+            known = json.loads(r.read().decode("utf-8")).get("data") or []
+    except Exception as ex:
+        soft("Could not list Loki's project values (%s) -- LOKI_PROJECTS not checked." % ex)
+        return
+    ok("Loki projects: %s" % (", ".join(known) or "(none)"))
+    for p in LOKI_PROJECTS:
+        if PROJECT_RE.match(p) and p not in known:
+            blocker("collector", "LOKI_PROJECTS names '%s', but Loki has no such project. "
+                                 "Loki has: %s" % (p, ", ".join(known) or "(none)"))
+
+
 def preflight():
     section("Pre-flight")
 
@@ -423,6 +508,17 @@ def preflight():
 
     # Loki problems don't stop the database setup, but the collector can't run
     # without Loki, so they fail the run rather than hiding in a yellow warning.
+    if LOKI_PROJECTS:
+        info("collector covers: %s%s" % (", ".join(LOKI_PROJECTS),
+             "" if env("LOKI_PROJECTS").replace(",", "").strip()
+             else "  (LOKI_PROJECTS unset -- LOKI_PROJECT alone)"))
+    else:
+        blocker("collector", "Set LOKI_PROJECTS (or LOKI_PROJECT) in gw-reports-secrets: the "
+                             "comma list of Loki project label values the collector covers.")
+    for p in LOKI_PROJECTS:
+        if not PROJECT_RE.match(p):
+            blocker("collector", "LOKI_PROJECTS entry '%s' is not a valid Loki project label "
+                                 "value: use 1-64 of A-Z a-z 0-9 . _ -" % p)
     if not LOKI_URL:
         blocker("collector", "LOKI_URL is not set -- the collector cannot run.")
     else:
@@ -456,6 +552,8 @@ def preflight():
                     if needed not in labels:
                         blocker("collector", "Loki has no '%s' label -- the collector's selector "
                                              "will match nothing." % needed)
+                if "project" in labels:
+                    check_loki_projects(opener)
             except Exception as ex:
                 if is_cert_error(ex):
                     blocker("collector", LOKI_CERT_HINT + " (%s)" % ex)
@@ -546,6 +644,12 @@ def _database_checks():
         len(tables), len(TABLES), len(views), len(VIEWS),
         "" if present else "  (normal before 'schema' has run)"))
 
+    missing_project = tables_missing_project(present)
+    if missing_project:
+        blocker("collector", upgrade_message(missing_project))
+    elif tables:
+        ok("tables have the project column")
+
     lacking_ddl = missing_ddl(present)
     if len(tables) < len(TABLES):
         # 'schema' is still to run, so a missing right is in the way.
@@ -559,11 +663,15 @@ def _database_checks():
                  "partway (re-run it), or its CREATE/ALTER rights were revoked after 'schema', "
                  "which hides the views from it. The collector doesn't use them; Grafana reads "
                  "them with its own login." % (len(views), len(VIEWS)))
-        if lacking_ddl:
+        if lacking_ddl and missing_project:
+            # The upgrade can't wait for the next schema.sql change.
+            soft(ddl_message(lacking_ddl))
+        elif lacking_ddl:
             info("Re-running 'schema' -- only needed when schema.sql changes -- would need "
                  "%s:\n%s" % (", ".join(lacking_ddl), grant_lines(lacking_ddl)))
         else:
-            ok("can re-run 'schema'")
+            ok("can re-run 'schema'%s" % (" -- which adds the project column"
+                                          if missing_project else ""))
 
     # What grants.sql needs: create users, and grant on dbo objects. Only for
     # Grafana's read-only login -- the collector never needs it.
@@ -642,11 +750,38 @@ def main():
 
     if args.action in ("schema", "all"):
         section("Apply schema")
-        lacking_ddl = missing_ddl(existing_objects())
+        present = existing_objects()
+        upgrade = tables_missing_project(present)
+        project = existing_project()
+        # Pasted into the SQL text, so never a value the collector would refuse.
+        valid = bool(PROJECT_RE.match(project))
+        if upgrade:
+            if not valid:
+                raise SystemExit(
+                    "The login tables have no project column yet (%s). Adding it tags their rows "
+                    "with the project they came from: LOKI_PROJECT, else the first LOKI_PROJECTS "
+                    "entry. %s Set it in gw-reports-secrets, then re-run 'schema'."
+                    % (", ".join(upgrade), "Neither is set." if not project else
+                       "'%s' is not a valid project value (1-64 of A-Z a-z 0-9 . _ -)." % project))
+            info("adding the project column to %s -- existing rows are tagged '%s'"
+                 % (", ".join(upgrade), project))
+        lacking_ddl = missing_ddl(present)
         if lacking_ddl:
             raise SystemExit(ddl_message(lacking_ddl))
-        run_sql_file(os.path.join(args.sql_root, "schema.sql"))
+        # schema.sql refuses an upgrade itself while ExistingProject is still its
+        # placeholder, so the placeholder may stand when there is none to do.
+        run_sql_file(os.path.join(args.sql_root, "schema.sql"),
+                     overrides={"ExistingProject": project if valid else ""},
+                     placeholder_ok=("ExistingProject",))
         present = existing_objects()
+        still = tables_missing_project(present)
+        if still:
+            raise SystemExit("schema.sql ran but %s still lack(s) the project column."
+                             % ", ".join(still))
+        if upgrade:
+            ok("project column added to %s" % ", ".join(upgrade))
+            # 'all' ran check first; its blocker about this is now out of date.
+            BLOCKERS[:] = [b for b in BLOCKERS if not b[1].startswith(NO_PROJECT_COLUMN)]
         missing = [n for n in EXPECTED_OBJECTS if n not in present]
         if missing:
             raise SystemExit("schema.sql ran but these objects are missing: %s" % ", ".join(missing))
@@ -691,6 +826,11 @@ def main():
 
     if args.action in ("verify", "all"):
         section("Verify")
+        # verify.sql reads the project column; say what to do rather than
+        # surfacing "Invalid column name 'project'".
+        missing_project = tables_missing_project(existing_objects())
+        if missing_project:
+            raise SystemExit(upgrade_message(missing_project))
         run_sql_file(os.path.join(args.sql_root, "verify.sql"), show_results=True)
         print("")
         info("Sections 3 (gaps) and 4 (per-user reconciliation) must be empty.")

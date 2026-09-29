@@ -44,7 +44,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT ISNULL(SUM(logins), 0) AS \"Total logins\"\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
+          "rawSql": "SELECT ISNULL(SUM(logins), 0) AS \"Total logins\"\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND project IN (${project:sqlstring})\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
         }
       ],
       "options": {
@@ -97,7 +97,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT COUNT(DISTINCT username) AS \"Distinct users\"\nFROM [${db}].dbo.gw_login_user_daily\nWHERE $__timeFilter(day_ts)\n    AND username <> '(unparsed)'\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
+          "rawSql": "SELECT COUNT(DISTINCT username) AS \"Distinct users\"\nFROM [${db}].dbo.gw_login_user_daily\nWHERE $__timeFilter(day_ts)\n    AND username <> '(unparsed)'\n    AND project IN (${project:sqlstring})\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
         }
       ],
       "options": {
@@ -130,7 +130,7 @@
       "id": 3,
       "type": "stat",
       "title": "Collector lag",
-      "description": "Days between today and the most recent day with data, worst series. 1 is normal. 3+ means investigate NOW: once a gap passes Loki's ~30-day retention it is unrecoverable. Ignores the dashboard time range on purpose.",
+      "description": "Days between today and the most recent day with data, for the most-behind selected project. Each project is measured by its freshest environment, so a decommissioned environment does not hold this red. 1 is normal. 3+ means investigate NOW: once a gap passes Loki's ~30-day retention it is unrecoverable. Ignores the dashboard time range and the Environment/Product filters on purpose.",
       "datasource": {
         "type": "mssql",
         "uid": "${ds}"
@@ -150,7 +150,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT ISNULL(MAX(days_behind), 9999) AS \"Days behind\"\nFROM [${db}].dbo.gw_login_freshness\nWHERE env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring});"
+          "rawSql": "SELECT ISNULL(MAX(lag), 9999) AS \"Days behind\"\nFROM (SELECT project, MIN(days_behind) AS lag\n      FROM [${db}].dbo.gw_login_freshness\n      WHERE project IN (${project:sqlstring})\n      GROUP BY project) x;"
         }
       ],
       "options": {
@@ -226,7 +226,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT env, SUM(logins) AS logins\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY env\nORDER BY SUM(logins) DESC;"
+          "rawSql": "SELECT project + ' / ' + env AS env, SUM(logins) AS logins\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND project IN (${project:sqlstring})\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY project, env\nORDER BY SUM(logins) DESC;"
         }
       ],
       "options": {
@@ -287,7 +287,7 @@
           },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT day_ts AS time, env AS metric, SUM(logins) AS value\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY day_ts, env\nORDER BY 1;"
+          "rawSql": "SELECT day_ts AS time, project + ' / ' + env AS metric, SUM(logins) AS value\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND project IN (${project:sqlstring})\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY day_ts, project, env\nORDER BY 1;"
         }
       ],
       "options": {
@@ -358,7 +358,7 @@
           },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT day_ts AS time, env AS metric, SUM(distinct_users) AS value\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY day_ts, env\nORDER BY 1;"
+          "rawSql": "SELECT day_ts AS time, project + ' / ' + env AS metric, SUM(distinct_users) AS value\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND project IN (${project:sqlstring})\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY day_ts, project, env\nORDER BY 1;"
         }
       ],
       "options": {
@@ -429,7 +429,7 @@
           },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT\n    CAST(DATEFROMPARTS(YEAR([day]), MONTH([day]), 1) AS DATETIME2(0)) AS time,\n    env AS metric,\n    SUM(logins) AS value\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY DATEFROMPARTS(YEAR([day]), MONTH([day]), 1), env\nORDER BY 1;"
+          "rawSql": "SELECT\n    CAST(DATEFROMPARTS(YEAR([day]), MONTH([day]), 1) AS DATETIME2(0)) AS time,\n    project + ' / ' + env AS metric,\n    SUM(logins) AS value\nFROM [${db}].dbo.gw_login_daily\nWHERE $__timeFilter(day_ts)\n    AND project IN (${project:sqlstring})\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY DATEFROMPARTS(YEAR([day]), MONTH([day]), 1), project, env\nORDER BY 1;"
         }
       ],
       "options": {
@@ -495,7 +495,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n    d.env                                            AS [Environment],\n    d.product                                        AS [Product],\n    SUM(d.logins)                                    AS [Logins],\n    COUNT(*)                                         AS [Days with data],\n    CAST(ROUND(AVG(CAST(d.logins AS FLOAT)), 0) AS INT) AS [Avg per day],\n    MAX(d.logins)                                    AS [Peak day],\n    MAX(d.[day])                                     AS [Last day]\nFROM [${db}].dbo.gw_login_daily d\nWHERE $__timeFilter(d.day_ts)\n    AND d.env IN (${env:sqlstring})\n    AND d.product IN (${product:sqlstring})\nGROUP BY d.env, d.product\nORDER BY d.env, d.product;"
+          "rawSql": "SELECT\n    d.project                                        AS [Project],\n    d.env                                            AS [Environment],\n    d.product                                        AS [Product],\n    SUM(d.logins)                                    AS [Logins],\n    COUNT(*)                                         AS [Days with data],\n    CAST(ROUND(AVG(CAST(d.logins AS FLOAT)), 0) AS INT) AS [Avg per day],\n    MAX(d.logins)                                    AS [Peak day],\n    MAX(d.[day])                                     AS [Last day]\nFROM [${db}].dbo.gw_login_daily d\nWHERE $__timeFilter(d.day_ts)\n    AND d.project IN (${project:sqlstring})\n    AND d.env IN (${env:sqlstring})\n    AND d.product IN (${product:sqlstring})\nGROUP BY d.project, d.env, d.product\nORDER BY d.project, d.env, d.product;"
         }
       ],
       "options": {
@@ -549,7 +549,7 @@
       "id": 9,
       "type": "table",
       "title": "Most active users",
-      "description": "Only possible because usernames are stored per day. Note this table holds user identifiers -- treat access accordingly.",
+      "description": "Only possible because usernames are stored per day. Environments are counted per project (DEV1 in two projects counts 2). Note this table holds user identifiers -- treat access accordingly.",
       "datasource": {
         "type": "mssql",
         "uid": "${ds}"
@@ -569,7 +569,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 25\n    username      AS [User],\n    SUM(logins)   AS [Logins],\n    COUNT(DISTINCT [day]) AS [Active days],\n    COUNT(DISTINCT env)   AS [Environments]\nFROM [${db}].dbo.gw_login_user_daily\nWHERE $__timeFilter(day_ts)\n    AND username <> '(unparsed)'\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY username\nORDER BY SUM(logins) DESC;"
+          "rawSql": "SELECT TOP 25\n    username      AS [User],\n    SUM(logins)   AS [Logins],\n    COUNT(DISTINCT [day])   AS [Active days],\n    COUNT(DISTINCT project) AS [Projects],\n    COUNT(DISTINCT project + '/' + env) AS [Environments]\nFROM [${db}].dbo.gw_login_user_daily\nWHERE $__timeFilter(day_ts)\n    AND username <> '(unparsed)'\n    AND project IN (${project:sqlstring})\n    AND env IN (${env:sqlstring})\n    AND product IN (${product:sqlstring})\nGROUP BY username\nORDER BY SUM(logins) DESC;"
         }
       ],
       "options": {
@@ -608,7 +608,7 @@
       "id": 10,
       "type": "table",
       "title": "Collector runs (most recent 20)",
-      "description": "Health of the pipeline feeding this dashboard. 'partial' means some Loki queries failed and those cells kept their previous values; the next run's lookback retries them.",
+      "description": "Health of the pipeline feeding this dashboard, one row per project per run. 'partial' means some Loki queries failed and those cells kept their previous values; the next run's lookback retries them.",
       "datasource": {
         "type": "mssql",
         "uid": "${ds}"
@@ -628,7 +628,7 @@
           },
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT TOP 20\n    started_at   AS [Started (UTC)],\n    status       AS [Status],\n    days_from    AS [From],\n    days_to      AS [To],\n    rows_written AS [Rows written],\n    query_errors AS [Query errors],\n    build_id     AS [Build],\n    detail       AS [Detail]\nFROM [${db}].dbo.gw_login_collector_run\nORDER BY started_at DESC;"
+          "rawSql": "SELECT TOP 20\n    started_at   AS [Started (UTC)],\n    project      AS [Project],\n    status       AS [Status],\n    days_from    AS [From],\n    days_to      AS [To],\n    rows_written AS [Rows written],\n    query_errors AS [Query errors],\n    build_id     AS [Build],\n    detail       AS [Detail]\nFROM [${db}].dbo.gw_login_collector_run\nWHERE project IN (${project:sqlstring})\nORDER BY started_at DESC;"
         }
       ],
       "options": {
@@ -731,6 +731,25 @@
         ]
       },
       {
+        "name": "project",
+        "label": "Project",
+        "type": "query",
+        "datasource": {
+          "type": "mssql",
+          "uid": "${ds}"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "refresh": 1,
+        "sort": 1,
+        "current": {},
+        "options": [],
+        "query": "SELECT project FROM [${db}].dbo.gw_login_daily UNION SELECT project FROM [${db}].dbo.gw_login_collector_run ORDER BY project;",
+        "definition": "SELECT project FROM [${db}].dbo.gw_login_daily UNION SELECT project FROM [${db}].dbo.gw_login_collector_run ORDER BY project;",
+        "description": "Projects with stored days or collector runs -- a run-only project (e.g. a new one whose first backfill failed) still shows in Collector runs."
+      },
+      {
         "name": "env",
         "label": "Environment",
         "type": "query",
@@ -745,8 +764,8 @@
         "sort": 1,
         "current": {},
         "options": [],
-        "query": "SELECT DISTINCT env FROM [${db}].dbo.gw_login_daily ORDER BY env;",
-        "definition": "SELECT DISTINCT env FROM [${db}].dbo.gw_login_daily ORDER BY env;"
+        "query": "SELECT DISTINCT env FROM [${db}].dbo.gw_login_daily WHERE project IN (${project:sqlstring}) ORDER BY env;",
+        "definition": "SELECT DISTINCT env FROM [${db}].dbo.gw_login_daily WHERE project IN (${project:sqlstring}) ORDER BY env;"
       },
       {
         "name": "product",
@@ -763,8 +782,8 @@
         "sort": 1,
         "current": {},
         "options": [],
-        "query": "SELECT DISTINCT product FROM [${db}].dbo.gw_login_daily ORDER BY product;",
-        "definition": "SELECT DISTINCT product FROM [${db}].dbo.gw_login_daily ORDER BY product;"
+        "query": "SELECT DISTINCT product FROM [${db}].dbo.gw_login_daily WHERE project IN (${project:sqlstring}) ORDER BY product;",
+        "definition": "SELECT DISTINCT product FROM [${db}].dbo.gw_login_daily WHERE project IN (${project:sqlstring}) ORDER BY product;"
       }
     ]
   },
@@ -786,6 +805,6 @@
   "timezone": "browser",
   "title": "Guidewire User Logins (historical)",
   "uid": "gw-user-logins-db",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

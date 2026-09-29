@@ -4,9 +4,26 @@
 -- Durable store for daily login counts scraped out of Loki. Loki retains ~30
 -- days; these tables are the permanent record, so Grafana can show years.
 --
--- Idempotent -- safe to re-run.
+-- One Loki holds several projects, and environment names (DEV1, QA4, ...)
+-- repeat across them, so every row carries `project` -- the Loki `project`
+-- label it was collected under, stored exactly as Loki has it -- and it leads
+-- every key.
+--
+-- No project column has a DEFAULT, on purpose: every writer must say which
+-- project a row belongs to. That also stops a collector older than the column
+-- cold. Its first statement, the INSERT into gw_login_collector_run, names no
+-- project and fails -- before it can reach its MERGE, which matches on (day,
+-- env, product) alone and would overwrite another project's rows for an
+-- environment name the two share.
+--
+-- Idempotent -- safe to re-run. Tables created before the project column are
+-- upgraded in place (see "Upgrade" below).
 --   sqlcmd -S <server> -d <database> -i schema.sql
+-- tools/setup.py sets ExistingProject itself. With sqlcmd, edit it below first
+-- if the tables predate the project column; otherwise it is never used.
 -- =============================================================================
+
+:setvar ExistingProject "your_existing_project"
 
 SET NOCOUNT ON;
 
@@ -27,14 +44,139 @@ SET NUMERIC_ROUNDABORT OFF;
 GO
 
 -- -----------------------------------------------------------------------------
--- gw_login_daily -- one row per (day, env, product). The grain the dashboard
--- reads. [day] is a calendar day in REPORT_TIMEZONE, matching the emailed
--- report; if that variable is unset both use UTC.
+-- Upgrade: tables created before the project column.
+--
+-- They hold one project's rows -- history older than Loki's retention, which
+-- cannot be collected again -- so the column is added in place and every
+-- stored row is tagged ExistingProject: the project the collector read then
+-- (LOKI_PROJECT). Keys and indexes are rebuilt to exactly the definitions the
+-- CREATE TABLEs below give a fresh install; only the column order differs
+-- (project comes last), and nothing depends on that.
+--
+-- One transaction: a failure leaves every table as it was. Statements that use
+-- the new column go through EXEC, so they are compiled when they run, after
+-- the ALTER TABLE -- compiled with this batch they would hit a column that
+-- doesn't exist yet. EXEC'd SQL runs under this session's SET options (batch
+-- 1), which the indexes on day_ts need.
+--
+-- Placed before the CREATE TABLEs: on a fresh database it finds nothing to do.
+-- -----------------------------------------------------------------------------
+IF (OBJECT_ID('dbo.gw_login_daily', 'U') IS NOT NULL
+        AND COL_LENGTH('dbo.gw_login_daily', 'project') IS NULL)
+   OR (OBJECT_ID('dbo.gw_login_user_daily', 'U') IS NOT NULL
+        AND COL_LENGTH('dbo.gw_login_user_daily', 'project') IS NULL)
+   OR (OBJECT_ID('dbo.gw_login_collector_run', 'U') IS NOT NULL
+        AND COL_LENGTH('dbo.gw_login_collector_run', 'project') IS NULL)
+BEGIN
+    -- The collector's rule for a project value: 1-64 of A-Z a-z 0-9 . _ -
+    -- Binary collation, so A-Z means those 26 letters and no accented ones.
+    IF N'$(ExistingProject)' = N'your_existing_project'
+       OR LEN(N'$(ExistingProject)') NOT BETWEEN 1 AND 64
+       OR N'$(ExistingProject)' COLLATE Latin1_General_100_BIN2 LIKE N'%[^A-Za-z0-9._-]%'
+    BEGIN
+        RAISERROR(N'The login tables predate the project column and must be upgraded, but ExistingProject is ''%s''. Set it to the Loki project the stored rows came from (LOKI_PROJECT; 1-64 of A-Z a-z 0-9 . _ -) and re-run. No table was upgraded.',
+                  16, 1, N'$(ExistingProject)');
+        RETURN;
+    END
+
+    -- Named in the error if the upgrade fails: a failed key or index rebuild
+    -- reports only its last message ('See previous errors'), so say where.
+    DECLARE @step NVARCHAR(128) = N'(start)';
+
+    SET XACT_ABORT ON;
+    BEGIN TRY
+        BEGIN TRAN;
+
+        IF OBJECT_ID('dbo.gw_login_daily', 'U') IS NOT NULL
+           AND COL_LENGTH('dbo.gw_login_daily', 'project') IS NULL
+        BEGIN
+            SET @step = N'dbo.gw_login_daily';
+            -- The default only fills the existing rows; see the header for why
+            -- it must not stay.
+            ALTER TABLE dbo.gw_login_daily
+                ADD project VARCHAR(64) NOT NULL
+                    CONSTRAINT DF_gw_login_daily_project_upgrade DEFAULT ('$(ExistingProject)');
+            ALTER TABLE dbo.gw_login_daily DROP CONSTRAINT DF_gw_login_daily_project_upgrade;
+            -- Nonclustered indexes first: dropping the clustered key with them
+            -- in place would rebuild each one twice.
+            EXEC(N'
+                DROP INDEX IF EXISTS IX_gw_login_daily_env_product_day ON dbo.gw_login_daily;
+                DROP INDEX IF EXISTS IX_gw_login_daily_day_ts ON dbo.gw_login_daily;
+                ALTER TABLE dbo.gw_login_daily DROP CONSTRAINT IF EXISTS PK_gw_login_daily;
+                ALTER TABLE dbo.gw_login_daily ADD CONSTRAINT PK_gw_login_daily
+                    PRIMARY KEY CLUSTERED (project, [day], env, product);
+                CREATE NONCLUSTERED INDEX IX_gw_login_daily_env_product_day
+                    ON dbo.gw_login_daily (project, env, product, [day])
+                    INCLUDE (logins, distinct_users);
+                CREATE NONCLUSTERED INDEX IX_gw_login_daily_day_ts
+                    ON dbo.gw_login_daily (day_ts)
+                    INCLUDE (project, env, product, logins, distinct_users);');
+            PRINT N'Upgraded dbo.gw_login_daily: added project, existing rows tagged $(ExistingProject).';
+        END
+
+        IF OBJECT_ID('dbo.gw_login_user_daily', 'U') IS NOT NULL
+           AND COL_LENGTH('dbo.gw_login_user_daily', 'project') IS NULL
+        BEGIN
+            SET @step = N'dbo.gw_login_user_daily';
+            ALTER TABLE dbo.gw_login_user_daily
+                ADD project VARCHAR(64) NOT NULL
+                    CONSTRAINT DF_gw_login_user_daily_project_upgrade DEFAULT ('$(ExistingProject)');
+            ALTER TABLE dbo.gw_login_user_daily DROP CONSTRAINT DF_gw_login_user_daily_project_upgrade;
+            EXEC(N'
+                DROP INDEX IF EXISTS IX_gw_login_user_daily_user ON dbo.gw_login_user_daily;
+                DROP INDEX IF EXISTS IX_gw_login_user_daily_day_ts ON dbo.gw_login_user_daily;
+                ALTER TABLE dbo.gw_login_user_daily DROP CONSTRAINT IF EXISTS PK_gw_login_user_daily;
+                ALTER TABLE dbo.gw_login_user_daily ADD CONSTRAINT PK_gw_login_user_daily
+                    PRIMARY KEY CLUSTERED (project, [day], env, product, username);
+                CREATE NONCLUSTERED INDEX IX_gw_login_user_daily_user
+                    ON dbo.gw_login_user_daily (username, [day])
+                    INCLUDE (project, env, product, logins);
+                CREATE NONCLUSTERED INDEX IX_gw_login_user_daily_day_ts
+                    ON dbo.gw_login_user_daily (day_ts)
+                    INCLUDE (project, env, product, username, logins);');
+            PRINT N'Upgraded dbo.gw_login_user_daily: added project, existing rows tagged $(ExistingProject).';
+        END
+
+        IF OBJECT_ID('dbo.gw_login_collector_run', 'U') IS NOT NULL
+           AND COL_LENGTH('dbo.gw_login_collector_run', 'project') IS NULL
+        BEGIN
+            SET @step = N'dbo.gw_login_collector_run';
+            ALTER TABLE dbo.gw_login_collector_run
+                ADD project VARCHAR(64) NOT NULL
+                    CONSTRAINT DF_gw_login_collector_run_project_upgrade DEFAULT ('$(ExistingProject)');
+            ALTER TABLE dbo.gw_login_collector_run DROP CONSTRAINT DF_gw_login_collector_run_project_upgrade;
+            EXEC(N'
+                DROP INDEX IF EXISTS IX_gw_login_collector_run_started ON dbo.gw_login_collector_run;
+                CREATE NONCLUSTERED INDEX IX_gw_login_collector_run_started
+                    ON dbo.gw_login_collector_run (started_at DESC)
+                    INCLUDE (project, status);');
+            PRINT N'Upgraded dbo.gw_login_collector_run: added project, existing rows tagged $(ExistingProject).';
+        END
+
+        COMMIT;
+    END TRY
+    BEGIN CATCH
+        -- XACT_ABORT has already doomed the transaction; undo it, then report
+        -- the error with where it happened.
+        DECLARE @err NVARCHAR(2048) = N'Upgrade of ' + @step + N' failed and was rolled back -- '
+            + N'no table was changed. Msg ' + CAST(ERROR_NUMBER() AS NVARCHAR(12)) + N': '
+            + ERROR_MESSAGE();
+        IF @@TRANCOUNT > 0 ROLLBACK;
+        RAISERROR(N'%s', 16, 1, @err);
+    END CATCH
+END
+GO
+
+-- -----------------------------------------------------------------------------
+-- gw_login_daily -- one row per (project, day, env, product). The grain the
+-- dashboard reads. [day] is a calendar day in REPORT_TIMEZONE, matching the
+-- emailed report; if that variable is unset both use UTC.
 -- -----------------------------------------------------------------------------
 IF OBJECT_ID('dbo.gw_login_daily', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.gw_login_daily
     (
+        project        VARCHAR(64)  NOT NULL,   -- Loki `project` label; no default
         [day]          DATE         NOT NULL,
         env            VARCHAR(32)  NOT NULL,   -- Loki `env` label, e.g. DEV1
         product        VARCHAR(8)   NOT NULL,   -- pc | bc | cc | cm
@@ -50,21 +192,23 @@ BEGIN
         -- which DATETIME2 accepts and DATE comparisons handle inconsistently.
         day_ts AS CAST([day] AS DATETIME2(0)) PERSISTED,
 
-        CONSTRAINT PK_gw_login_daily PRIMARY KEY CLUSTERED ([day], env, product),
+        CONSTRAINT PK_gw_login_daily PRIMARY KEY CLUSTERED (project, [day], env, product),
         CONSTRAINT CK_gw_login_daily_logins CHECK (logins >= 0),
         CONSTRAINT CK_gw_login_daily_users  CHECK (distinct_users >= 0)
     );
 
     CREATE NONCLUSTERED INDEX IX_gw_login_daily_env_product_day
-        ON dbo.gw_login_daily (env, product, [day]) INCLUDE (logins, distinct_users);
+        ON dbo.gw_login_daily (project, env, product, [day])
+        INCLUDE (logins, distinct_users);
 
     CREATE NONCLUSTERED INDEX IX_gw_login_daily_day_ts
-        ON dbo.gw_login_daily (day_ts) INCLUDE (env, product, logins, distinct_users);
+        ON dbo.gw_login_daily (day_ts)
+        INCLUDE (project, env, product, logins, distinct_users);
 END
 GO
 
 -- -----------------------------------------------------------------------------
--- gw_login_user_daily -- one row per (day, env, product, username).
+-- gw_login_user_daily -- one row per (project, day, env, product, username).
 --
 -- Exists because daily distinct counts CANNOT be summed into a monthly or
 -- quarterly distinct count. Keeping the usernames is the only way to answer
@@ -82,6 +226,7 @@ IF OBJECT_ID('dbo.gw_login_user_daily', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.gw_login_user_daily
     (
+        project      VARCHAR(64)   NOT NULL,   -- Loki `project` label; no default
         [day]        DATE          NOT NULL,
         env          VARCHAR(32)   NOT NULL,
         product      VARCHAR(8)    NOT NULL,
@@ -99,20 +244,22 @@ BEGIN
         day_ts AS CAST([day] AS DATETIME2(0)) PERSISTED,
 
         CONSTRAINT PK_gw_login_user_daily
-            PRIMARY KEY CLUSTERED ([day], env, product, username),
+            PRIMARY KEY CLUSTERED (project, [day], env, product, username),
         CONSTRAINT CK_gw_login_user_daily_logins CHECK (logins >= 0)
     );
 
     CREATE NONCLUSTERED INDEX IX_gw_login_user_daily_user
-        ON dbo.gw_login_user_daily (username, [day]) INCLUDE (env, product, logins);
+        ON dbo.gw_login_user_daily (username, [day])
+        INCLUDE (project, env, product, logins);
 
     CREATE NONCLUSTERED INDEX IX_gw_login_user_daily_day_ts
-        ON dbo.gw_login_user_daily (day_ts) INCLUDE (env, product, username, logins);
+        ON dbo.gw_login_user_daily (day_ts)
+        INCLUDE (project, env, product, username, logins);
 END
 GO
 
 -- -----------------------------------------------------------------------------
--- gw_login_collector_run -- one row per collector execution.
+-- gw_login_collector_run -- one row per project per collector execution.
 --
 -- The silent failure mode of this design is nasty: if the collector stops
 -- running the dashboard just quietly stops growing, and once the gap falls
@@ -124,6 +271,7 @@ BEGIN
     CREATE TABLE dbo.gw_login_collector_run
     (
         run_id       BIGINT IDENTITY(1,1) NOT NULL,
+        project      VARCHAR(64)    NOT NULL,   -- Loki `project` label; no default
         started_at   DATETIME2(0)   NOT NULL,
         finished_at  DATETIME2(0)   NULL,
         status       VARCHAR(16)    NOT NULL,   -- running | ok | partial | failed
@@ -137,16 +285,18 @@ BEGIN
     );
 
     CREATE NONCLUSTERED INDEX IX_gw_login_collector_run_started
-        ON dbo.gw_login_collector_run (started_at DESC);
+        ON dbo.gw_login_collector_run (started_at DESC)
+        INCLUDE (project, status);
 END
 GO
 
 -- -----------------------------------------------------------------------------
--- Convenience views.
+-- Convenience views. Per project, like the tables.
 -- -----------------------------------------------------------------------------
 CREATE OR ALTER VIEW dbo.gw_login_monthly
 AS
 SELECT
+    project,
     DATEFROMPARTS(YEAR([day]), MONTH([day]), 1) AS [month],
     CAST(DATEFROMPARTS(YEAR([day]), MONTH([day]), 1) AS DATETIME2(0)) AS month_ts,
     env,
@@ -154,7 +304,8 @@ SELECT
     SUM(logins) AS logins,
     COUNT(*)    AS days_with_data
 FROM dbo.gw_login_daily
-GROUP BY DATEFROMPARTS(YEAR([day]), MONTH([day]), 1),
+GROUP BY project,
+         DATEFROMPARTS(YEAR([day]), MONTH([day]), 1),
          CAST(DATEFROMPARTS(YEAR([day]), MONTH([day]), 1) AS DATETIME2(0)),
          env, product;
 GO
@@ -165,6 +316,7 @@ GO
 CREATE OR ALTER VIEW dbo.gw_login_monthly_users
 AS
 SELECT
+    project,
     DATEFROMPARTS(YEAR([day]), MONTH([day]), 1) AS [month],
     CAST(DATEFROMPARTS(YEAR([day]), MONTH([day]), 1) AS DATETIME2(0)) AS month_ts,
     env,
@@ -172,7 +324,8 @@ SELECT
     COUNT(DISTINCT username) AS distinct_users
 FROM dbo.gw_login_user_daily
 WHERE username <> '(unparsed)'
-GROUP BY DATEFROMPARTS(YEAR([day]), MONTH([day]), 1),
+GROUP BY project,
+         DATEFROMPARTS(YEAR([day]), MONTH([day]), 1),
          CAST(DATEFROMPARTS(YEAR([day]), MONTH([day]), 1) AS DATETIME2(0)),
          env, product;
 GO
@@ -180,10 +333,11 @@ GO
 CREATE OR ALTER VIEW dbo.gw_login_freshness
 AS
 SELECT
+    project,
     env,
     product,
     MAX([day]) AS last_day,
     DATEDIFF(DAY, MAX([day]), CAST(SYSUTCDATETIME() AS DATE)) AS days_behind
 FROM dbo.gw_login_daily
-GROUP BY env, product;
+GROUP BY project, env, product;
 GO

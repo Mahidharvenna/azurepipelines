@@ -2,9 +2,10 @@
 # TEMPORARY bootstrap pipeline for the login-history database.
 #
 # Does the one-off setup that would otherwise need sqlcmd on someone's laptop:
-# pre-flight checks, schema, grants, verification. Delete it once the dashboard
-# is live -- the daily collector (gw-login-collector.yaml) is the thing that
-# stays.
+# pre-flight checks, schema, grants, verification. Once the dashboard is live,
+# disable it rather than delete it: schema upgrades (adding projects, for one)
+# run through it. The daily collector (gw-login-collector.yaml) is the thing
+# that runs every day.
 #
 # Python + pymssql, same as the collector. A successful 'check' therefore also
 # proves the collector can reach and write to SQL Server from this agent.
@@ -13,7 +14,8 @@
 #
 # Run it in this order:
 #   1. check    -- touches nothing, tells you what is wrong
-#   2. schema   -- creates the tables
+#   2. schema   -- creates the tables, or adds the project column to tables
+#                  made before it (their rows are tagged LOKI_PROJECT)
 #   3. grants   -- needs grafanaLogin
 #   4. verify   -- after the collector's first backfill
 # =============================================================================
@@ -31,7 +33,7 @@ parameters:
   default: check
   values:
     - check      # pre-flight only -- no writes
-    - schema     # create tables and views (idempotent)
+    - schema     # create tables and views, or upgrade them (idempotent)
     - grants     # apply permissions -- needs grafanaLogin below
     - verify     # run the checks and print every result set
     - all        # check, schema, grants, verify
@@ -68,10 +70,13 @@ variables:
 # Shared with reports/gw-monthly-login-report.yaml ON PURPOSE. LOKI_PROJECT,
 # LOGIN_USER_REGEX, REPORT_TIMEZONE, ENVS and PRODUCT_JOBS must be identical in
 # both jobs or the dashboard silently stops reconciling with the spreadsheet --
-# one group makes drift impossible. Collector-only settings (LOOKBACK_DAYS,
-# DB_ENCRYPT, ...) all have working defaults; add them here only to
-# override. The group also holds SMTP secrets; they are never mapped into this
-# job's env, and ADO does not expose an unmapped secret to a script.
+# one group makes drift impossible. Collector-only settings (LOKI_PROJECTS,
+# LOOKBACK_DAYS, DB_ENCRYPT, ...) all have working defaults; add them here
+# only to override. 'check' compares LOKI_PROJECTS with the projects Loki has,
+# and 'schema' tags rows that predate the project column with LOKI_PROJECT,
+# the one project collected before. The group also holds SMTP secrets; they
+# are never mapped into this job's env, and ADO does not expose an unmapped
+# secret to a script.
 - group: 'gw-reports-secrets'
 
 steps:
@@ -156,6 +161,7 @@ steps:
     DB_ENCRYPT:            $(DB_ENCRYPT)
     LOKI_URL:              $(LOKI_URL)
     LOKI_PROJECT:          $(LOKI_PROJECT)
+    LOKI_PROJECTS:         $(LOKI_PROJECTS)       # optional: unset = LOKI_PROJECT alone
     LOKI_VERIFY_TLS:       $(LOKI_VERIFY_TLS)
     LOKI_CA_BUNDLE:        $(LOKI_CA_BUNDLE)      # optional: internal CA .pem for Loki
     BYPASS_PROXY:          $(BYPASS_PROXY)

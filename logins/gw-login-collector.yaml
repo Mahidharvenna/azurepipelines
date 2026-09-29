@@ -5,6 +5,10 @@
 # Grafana reads SQL Server, so the dashboard is not capped by Loki's ~30-day
 # retention. Companion to reports/monthly_report.py -- same Loki selector, same
 # LOGIN_USER_REGEX, same REPORT_TIMEZONE, so the numbers reconcile.
+#
+# Covers several Loki projects (the `project` label): every one listed in
+# LOKI_PROJECTS, each under its own run row, and every stored row carries its
+# project. The 'project' parameter narrows a manual run to one of them.
 
 # No schedules: block here on purpose. Manage the schedule in the UI
 # (Edit -> ... -> Triggers -> Scheduled -> + Add) as the single source of truth:
@@ -20,6 +24,17 @@ pr: none
 name: 'GW-LoginCollector-$(Date:yyyyMMdd).$(Rev:r)'
 
 parameters:
+# Which Loki project to collect. Scheduled runs can't pass parameters, so they
+# always use the default, 'all': every project in LOKI_PROJECTS. Type one Loki
+# `project` label value to backfill a newly added project or repair one
+# project's gap. A text box rather than a list on purpose: a list would have to
+# spell out the project names, and the real ones live only in LOKI_PROJECTS.
+# A value Loki doesn't know stops the run and prints the ones it has.
+- name: project
+  displayName: 'Project: all, or one Loki project label value'
+  type: string
+  default: all
+
 # Seed history at go-live, or repair a gap. 'none' = normal daily mode.
 # Defaults are 'none', not '': this ADO Server's Run dialog marks a text
 # parameter with an empty default as Required and won't start until something
@@ -56,10 +71,10 @@ variables:
 # Shared with reports/gw-monthly-login-report.yaml ON PURPOSE. LOKI_PROJECT,
 # LOGIN_USER_REGEX, REPORT_TIMEZONE, ENVS and PRODUCT_JOBS must be identical in
 # both jobs or the dashboard silently stops reconciling with the spreadsheet --
-# one group makes drift impossible. Collector-only settings (LOOKBACK_DAYS,
-# DB_ENCRYPT, ...) all have working defaults; add them here only to
-# override. The group also holds SMTP secrets; they are never mapped into this
-# job's env, and ADO does not expose an unmapped secret to a script.
+# one group makes drift impossible. Collector-only settings (LOKI_PROJECTS,
+# LOOKBACK_DAYS, DB_ENCRYPT, ...) all have working defaults; add them here
+# only to override. The group also holds SMTP secrets; they are never mapped
+# into this job's env, and ADO does not expose an unmapped secret to a script.
 - group: 'gw-reports-secrets'
 
 steps:
@@ -134,6 +149,7 @@ steps:
     # --- Loki ---
     LOKI_URL:            $(LOKI_URL)
     LOKI_PROJECT:        $(LOKI_PROJECT)
+    LOKI_PROJECTS:       $(LOKI_PROJECTS)       # comma list; unset = LOKI_PROJECT alone
     LOKI_VERIFY_TLS:     $(LOKI_VERIFY_TLS)
     LOKI_CA_BUNDLE:      $(LOKI_CA_BUNDLE)      # optional: internal CA .pem for Loki
     BYPASS_PROXY:        $(BYPASS_PROXY)
@@ -159,6 +175,7 @@ steps:
     STORE_USERNAMES:  $(STORE_USERNAMES)
     LOOKBACK_DAYS:    $(LOOKBACK_DAYS)
     # --- run mode ---
+    PROJECT:        ${{ parameters.project }}
     BACKFILL_START: ${{ parameters.backfillStart }}
     BACKFILL_END:   ${{ parameters.backfillEnd }}
     DRY_RUN:        ${{ parameters.dryRun }}

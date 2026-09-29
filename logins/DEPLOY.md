@@ -24,6 +24,7 @@ file it needs is committed.
 | 5 | Grafana datasource and dashboard | you |
 | 6 | Staleness alert | you |
 | 7 | Next-morning check | you |
+| — | Adding projects to a live deployment | you, once |
 
 ---
 
@@ -157,16 +158,19 @@ A copy would work on day one and drift afterwards: tune the regex in one group
 and the dashboard silently stops reconciling with the spreadsheet. One group
 makes that impossible.
 
-> **`LOKI_PROJECT` especially.** If it is missing the code falls back to the
+> **`LOKI_PROJECT` especially.** The collector falls back to it while
+> `LOKI_PROJECTS` is unset. If both are missing the code falls back to the
 > placeholder `myproject`, Loki matches nothing, and every count is a
-> successful-looking **0**. If the report works, the group already has it.
+> successful-looking **0** — `check` stops on it. If the report works, the
+> group already has it.
 
-**Nothing new has to be added.** Every collector-only setting has a working
-default, and an undefined `$(NAME)` is treated as unset. Add one only to
-override it:
+**Nothing new has to be added** for a single project. Every collector-only
+setting has a working default, and an undefined `$(NAME)` is treated as unset.
+Add one only to override it:
 
 | Variable | Default | Override when |
 |---|---|---|
+| `LOKI_PROJECTS` | `LOKI_PROJECT` | You collect more than one project: a comma list of Loki `project` label values, e.g. `project_a,project_b,project_c`. `check` lists the values Loki has. On a live deployment, follow *Adding projects* — the order matters. |
 | `DB_ENCRYPT` | `true` | The server can't negotiate TLS. `check` detects it and says so. `false` matches a default SqlClient connection, which is unencrypted. The certificate is never verified either way. |
 | `LOKI_CA_BUNDLE` | — | Loki uses an internal CA and you can't add it to the OS store. Path to a `.pem` on the agent. |
 | `PIP_INDEX_URL` / `HTTPS_PROXY` | — | Only for a Python other than 3.12 / 3.9 on an agent without PyPI (0.3). |
@@ -202,11 +206,14 @@ would stop the collector:
 
 - the agent's OS, Python, and the `pymssql` it installed
 - TCP to SQL Server and to Loki; Loki's labels and TLS trust
+- the projects the collector covers (`LOKI_PROJECTS`), each checked against
+  the `project` values Loki actually has
 - that SQL Server answers its handshake — `pymssql` would otherwise hang
   forever on a firewall that accepts connections and then goes silent
 - SQL Server is Microsoft SQL Server, 2016 SP1 or later
 - the account can create tables and views in `dbo`, create users, and grant on `dbo`
-- once the tables exist: that `DBUSER` can read and write them
+- once the tables exist: that they have the `project` column, and that
+  `DBUSER` can read and write them
 
 If the connection fails with encryption on, `check` retries once unencrypted —
 for the diagnosis only — so credentials, version and rights are still checked,
@@ -219,7 +226,8 @@ Read the **Done** section at the bottom — it lists everything to fix, labelled
 ### `schema`
 
 Creates three tables and three views, then confirms all six exist by name.
-Idempotent — safe to re-run.
+Idempotent — safe to re-run. Tables made before the `project` column are
+upgraded in place instead: see *Adding projects*.
 
 The pipeline's account creates them, so it needs the rights to. If `check`
 warned *This account lacks …, which 'schema' needs*, it printed the exact
@@ -280,7 +288,10 @@ a table in `dbo` doesn't make you its owner, so `db_ddladmin` alone isn't enough
 > Prefer sqlcmd? `sqlcmd -S <server> -d <database> -i logins/sql/schema.sql`,
 > then edit the two `:setvar` lines at the top of `grants.sql` and run it the
 > same way. `schema.sql` sets `QUOTED_IDENTIFIER ON` itself — sqlcmd defaults it
-> off, which would otherwise make the computed-column indexes fail.
+> off, which would otherwise make the computed-column indexes fail. Upgrading
+> tables made before the `project` column? First set the
+> `:setvar ExistingProject` line in `schema.sql` to your `LOKI_PROJECT` value —
+> the pipeline does that itself.
 
 ---
 
@@ -310,15 +321,29 @@ YAML ones — so a `schedules:` block added later "as a backup" would never run.
 Four runs, each proving one new thing. A failure at step 3 is only easy to
 diagnose if 1 and 2 passed.
 
+Every run also has a **`Project`** box. Its default, `all`, collects every
+project in `LOKI_PROJECTS` (just `LOKI_PROJECT` while that's unset), one after
+another, each under its own run row; type one Loki `project` value to run only
+that one. It's a text box rather than a list so the project names stay out of
+the YAML. A value Loki doesn't have stops the run before anything is written
+and prints the ones it has; a difference only in case is corrected. Leave it at
+`all` for the tests below. Scheduled runs can't pass parameters, so they always
+run `all`.
+
 ### Test 1 — Loki, labels and regex *(writes nothing)*
 
 **Run → tick `Dry run` → Run.**
+
+The header prints `Projects : …`; each project then gets a
+`--- project … : N env(s)` line and its own counts.
 
 - Non-zero logins **and** non-zero distinct users → selector and regex both good.
 - Logins but zero distinct users → `LOGIN_USER_REGEX` doesn't match. The log
   prints sample unmatched lines; fix it before storing anything, or you'll
   backfill 30 days of `(unparsed)`.
-- All zeros → wrong `ENVS` casing, `LOKI_PROJECT`, or `job` label.
+- All zeros → wrong `ENVS` casing, `LOKI_PROJECTS` / `LOKI_PROJECT` value, or
+  `job` label. Zeros — or `found no 'env' label values` — for one project
+  only → that project's value.
 
 The header also prints `Day boundaries : … (<rule>)`. It must match what the
 report uses — see *Reconcile* in phase 5.
@@ -348,12 +373,13 @@ rather than counts, because that's what usernames require.
 
 | Section | Expected |
 |---|---|
-| 1. Coverage | ~30 days per env, plausible totals |
+| 0. Projects | one row per project in `LOKI_PROJECTS`, ~30 days each |
+| 1. Coverage | ~30 days per project and env, plausible totals |
 | 2. Freshness | `days_behind` = 1 |
 | 3. Gaps | **empty** |
 | 4. Per-user reconciliation | **empty** — user rows sum to daily totals |
 | 5. Unparsed | small or empty; large means tune the regex |
-| 6. Runs | `status = ok`, `query_errors = 0` |
+| 6. Runs | one row per project per run, `status = ok`, `query_errors = 0` |
 
 ---
 
@@ -374,20 +400,22 @@ rather than counts, because that's what usernames require.
    that datasource. If `DBNAME` isn't `Dashboard`, set the hidden variable
    `db` to it: **Dashboard settings → Variables → db**.
 
-Import *after* phase 4: the `Environment` and `Product` dropdowns are populated
-from the tables, and against empty tables they render as `IN ()`, which SQL
-Server rejects.
+Import *after* phase 4: the `Project`, `Environment` and `Product` dropdowns
+are populated from the tables, and against empty tables they render as `IN ()`,
+which SQL Server rejects.
 
-**Check** at *Last 90 days*: both dropdowns populated, daily series drawn,
-*Collector lag* green at **1**, *Most active users* populated, *Collector runs*
-green.
+**Check** at *Last 90 days*: all three dropdowns populated, daily series drawn
+— one per `project / env` — *Collector lag* green at **1**, *Most active users*
+populated, *Collector runs* green.
 
 ### Reconcile against the report
 
 Run `monthly_report.py` for a month that's fully inside the collected range and
-compare totals. They should match closely — both count events from the same
-`|= "User Login"` match, both bucket days in `REPORT_TIMEZONE`, and the report
-already labels each `count_over_time` sample with `timestamp - 1d`.
+compare totals, with *Project* set to the report's `LOKI_PROJECT` — the report
+covers that one project only. They should match closely — both count events
+from the same `|= "User Login"` match, both bucket days in `REPORT_TIMEZONE`,
+and the report already labels each `count_over_time` sample with
+`timestamp - 1d`.
 
 Remaining differences are worth chasing, not shrugging at. The usual causes:
 
@@ -410,12 +438,16 @@ just stops growing, and past ~30 days the gap is permanent.
 
 - **Query A** (MSSQL, *Table* format):
   ```sql
-  SELECT ISNULL(MAX(days_behind), 9999) AS days_behind FROM [Dashboard].dbo.gw_login_freshness;
+  SELECT ISNULL(MAX(lag), 9999) AS days_behind FROM (SELECT project, MIN(days_behind) AS lag FROM [Dashboard].dbo.gw_login_freshness GROUP BY project) x;
   ```
   `Dashboard` is `DBNAME` — alert queries can't use the dashboard's `db`
   variable, so it's spelled out.
 - **Condition**: `WHEN Last() OF A IS ABOVE 2`
 - **Evaluate** every `1h` for `2h`, routed somewhere a human reads.
+
+It reports the most-behind project, each measured by its freshest
+environment — so a decommissioned environment, which just stops getting rows,
+doesn't hold it red forever.
 
 `1` is steady state. `2` is one missed run. `3+` means act today.
 
@@ -425,11 +457,89 @@ just stops growing, and past ~30 days the gap is permanent.
 
 **`GW-Login-Setup` → `action` = `verify`.**
 
-`days_behind` = 1, a new `ok` run from the schedule, gaps and reconciliation
-still empty. That's the deployment confirmed end to end.
+`days_behind` = 1, a new `ok` run per project from the schedule, gaps and
+reconciliation still empty. That's the deployment confirmed end to end.
 
 Then check again the morning after. One scheduled run proves the schedule
 exists; two prove the *only if source changed* box is unticked.
+
+---
+
+## Adding projects *(upgrade to multi-project)*
+
+For a deployment that went live collecting one project — `LOKI_PROJECT` — and
+now has to cover several in the same Loki. Environment names repeat across
+projects, so every row now carries a `project` column that leads every key.
+Tables made before it have none; their rows are history Loki can no longer
+rebuild, so they are kept and tagged with that one project.
+
+1. **Bring the code into TFS, then do step 2 — both before the next scheduled
+   run.** The schema upgrade and the collector code go together; either one
+   alone stops the collector, safely. The old collector fails at its first
+   `INSERT` against upgraded tables — by design, before its `MERGE` could
+   overwrite another project's rows that share an environment name — and the
+   new collector refuses tables without the column and says so. Neither
+   writes anything, and the next run's lookback fills the missed day.
+
+2. **Add the column: `GW-Login-Setup` → `check`, then `schema`.** (Deleted
+   `GW-Login-Setup` after go-live? Register it again as in phase 2.) The stored
+   rows are tagged with `LOKI_PROJECT` — the only project the collector read
+   until now — whether or not `LOKI_PROJECTS` is already set. `check` names the
+   value — *the existing rows … are tagged '…'*; if it's wrong, stop there.
+
+   The upgrade needs only `ALTER ON SCHEMA::dbo`. If a DBA revoked it after
+   phase 2, `check` prints the exact line to re-grant — for `svc_user`:
+
+   ```sql
+   GRANT ALTER ON SCHEMA::dbo TO [svc_user];
+   ```
+
+   `schema` then adds `project` to all three tables in one transaction — a
+   failure leaves them as they were — rebuilds their keys and indexes, and
+   updates the views. Existing grants survive. As in phase 2, it ends with
+   the `REVOKE` line; revoke the right again.
+
+3. **List the projects.** Add `LOKI_PROJECTS` to `gw-reports-secrets`: the
+   Loki `project` label values to collect, spelled exactly as Loki has them,
+   e.g. `project_a,project_b,project_c`. Run `check`: it prints
+   `Loki projects: …` — the values Loki actually has — and fails on any entry
+   that isn't one of them.
+
+   `ENVS` applies to every project: `ALL` asks Loki for each project's own
+   environments; an explicit list is used as-is for all of them.
+
+4. **Backfill each new project — now.** Loki drops a day every day. For each
+   new project: **`GW-Login-Collector` → type that project in `Project`,
+   `Backfill start` = 30 days ago → Run.** A dry run of it first (phase 4,
+   test 1) is worth the minutes: `LOGIN_USER_REGEX` and `PRODUCT_JOBS` are
+   shared by every project, so one that logs differently shows up as zero
+   distinct users. The project already in the tables needs no backfill.
+   `verify` afterwards: section 0 lists one row per project.
+
+5. **Re-import the dashboard** — phase 5, step 2 — and choose **Import
+   (Overwrite)**: same uid. It gains a *Project* dropdown, and series and rows
+   are labelled `project / env`. Set `db` again if you had changed it.
+
+6. **Update the staleness alert** to the per-project query in phase 6. The
+   schedule stays as it is: scheduled runs collect `all`.
+
+7. **Optional: remove the first project's stray zero rows.** Env discovery used
+   to list every project's environments, so the first project got a row of
+   zeros each day for every environment of the others. They clutter its
+   *Environment* dropdown and `verify`'s freshness. Run this as an account
+   that can delete from `gw_login_daily` — the collector's grants don't
+   include it — with `project_a` replaced by the value from step 2:
+
+   ```sql
+   DELETE FROM [Dashboard].dbo.gw_login_daily
+   WHERE project = 'project_a'
+     AND env IN (SELECT env FROM [Dashboard].dbo.gw_login_daily
+                 WHERE project = 'project_a' GROUP BY env HAVING SUM(logins) = 0);
+   ```
+
+   It removes every environment that never had a login under that project —
+   the other projects' included. A real environment that has only been idle
+   comes back, with zeros, from the next run.
 
 ---
 
@@ -458,15 +568,22 @@ exists; two prove the *only if source changed* box is unticked.
 | `Login failed for user` | wrong `DBUSER` / `DBPASS` | fix the DB variable group |
 | `older than 2016 SP1` | SQL Server too old for `CREATE OR ALTER` | use a newer instance |
 | Collector ran once, then never again | *Only schedule builds if the source … changed* is ticked | phase 3, step 2 |
-| Every Grafana panel: `Incorrect syntax near ')'`, and a ⚠ on the *Environment* / *Product* dropdowns | the dropdowns came back empty, so panels render `env IN ()`. The datasource can't read the tables — another server, no `SELECT`, or the dashboard's `db` variable isn't `DBNAME` — or they're still empty | hover the ⚠ on *Environment* for the real error; phase 5 |
-| Every count is 0 | `LOKI_PROJECT` / `ENVS` / `job` wrong | phase 4, test 1 |
+| `The login tables have no project column yet` | the tables predate the `project` column, and the collector refuses to write to them | run setup `schema` — *Adding projects*, step 2 |
+| `Cannot insert the value NULL into column 'project'` from the collector | the TFS copy of `collect_logins.py` is older than the tables | sync the code into TFS — *Adding projects*, step 1 |
+| `Invalid column name 'project'` in Grafana or `verify` | the dashboard or `verify.sql` is newer than the tables | run setup `schema` — *Adding projects*, step 2 |
+| `LOKI_PROJECTS names '…', but Loki has no such project` | a typo, or not the value Loki uses | fix `LOKI_PROJECTS` — the message lists the values Loki has |
+| Every Grafana panel: `Incorrect syntax near ')'`, and a ⚠ on the *Project* / *Environment* / *Product* dropdowns | the dropdowns came back empty, so panels render `project IN ()`. The datasource can't read the tables — another server, no `SELECT`, or the dashboard's `db` variable isn't `DBNAME` — or they're still empty | hover the ⚠ on *Project* for the real error; phase 5 |
+| Every count is 0 | `LOKI_PROJECTS` / `LOKI_PROJECT` / `ENVS` / `job` wrong | phase 4, test 1 |
 
 ---
 
 ## Rollback
 
-Nothing above modifies an existing object; the only change outside the new
-objects is the rights granted to `DBUSER` in phase 2.
+Nothing in phases 0–7 modifies an existing object; the only change outside
+the new objects is the rights granted to `DBUSER` in phase 2. *Adding
+projects* is the exception: it alters the three tables in place, and the old
+collector can't write to them afterwards, so fix forward rather than going
+back to the old code.
 
 1. Disable `GW-Login-Collector`.
 2. Delete the Grafana dashboard and alert rule.
