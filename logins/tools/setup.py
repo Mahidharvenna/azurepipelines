@@ -40,8 +40,9 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gwcommon import (env, env_bool, harden_stdio, explain_import_error, choose_driver,
-                      odbc_quote, parse_server, explain_connect_error, loki_ssl_context,
-                      is_cert_error, LOKI_CERT_HINT, one_line)
+                      parse_server, explain_connect_error, loki_ssl_context, is_cert_error,
+                      LOKI_CERT_HINT, one_line, driver_kind, connection_string as build_connstr,
+                      apply_session_options)
 
 harden_stdio()
 
@@ -130,18 +131,10 @@ def get_driver():
 
 
 def connection_string():
-    parts = ["DRIVER={%s}" % get_driver(), "SERVER=%s" % DB_SERVER, "DATABASE=%s" % DB_NAME]
-    if DB_TRUSTED:
-        parts.append("Trusted_Connection=yes")
-    else:
-        if not DB_USER:
-            raise SystemExit("Set DB_USER/DB_PASS, or DB_TRUSTED_CONNECTION=true.")
-        parts += ["UID=%s" % odbc_quote(DB_USER), "PWD=%s" % odbc_quote(DB_PASS)]
-    parts.append("Encrypt=yes" if DB_ENCRYPT else "Encrypt=no")
-    if DB_TRUST_CERT:
-        parts.append("TrustServerCertificate=yes")
-    parts.append("APP=GW-Login-Setup")
-    return ";".join(parts) + ";"
+    if not DB_TRUSTED and not DB_USER:
+        raise SystemExit("Set DB_USER/DB_PASS, or DB_TRUSTED_CONNECTION=true.")
+    return build_connstr(get_driver(), DB_SERVER, DB_NAME, DB_USER, DB_PASS, DB_TRUSTED,
+                         DB_ENCRYPT, DB_TRUST_CERT, app="GW-Login-Setup")
 
 
 def connect():
@@ -151,6 +144,7 @@ def connect():
     except p.Error as ex:
         raise SystemExit(explain_connect_error(ex, DB_SERVER, DB_NAME))
     cn.autocommit = True          # DDL and GRANT; no transaction to manage
+    apply_session_options(cn)
     return cn
 
 
@@ -428,7 +422,11 @@ def preflight():
         installed = p.drivers()
         info("ODBC drivers on this agent: %s" % (", ".join(installed) or "none"))
         driver = get_driver()
-        ok("using %s%s" % (driver, "" if DB_DRIVER_REQUESTED else " (newest installed)"))
+        if driver_kind(driver) == "freetds":
+            ok("using %s -- Microsoft's driver is preferred and is picked automatically "
+               "once installed" % driver)
+        else:
+            ok("using %s%s" % (driver, "" if DB_DRIVER_REQUESTED else " (newest installed)"))
     except SystemExit as ex:
         blocker("db", str(ex))
         return                          # nothing below can run without a driver
@@ -450,26 +448,33 @@ def _database_checks():
         version = str(scalar("SELECT @@VERSION") or "")
     except SystemExit as ex:
         first = str(ex)
-        if DB_TRUST_CERT or "TLS:" not in first:
+        freetds = driver_kind(get_driver()) == "freetds"
+        # FreeTDS says 'unable to connect' for everything, a bad certificate
+        # included, so for FreeTDS the retry is the only way to tell.
+        if DB_TRUST_CERT or not (freetds or "TLS:" in first):
             raise
         # A certificate problem hides everything behind it -- credentials,
         # version, rights -- and would cost a second run to discover. Retry once
         # without validating the certificate, for this diagnosis only.
-        info("TLS failed -- retrying once with TrustServerCertificate=yes (diagnosis only, "
-             "this run only) to check everything behind it.")
+        info(("FreeTDS could not connect -- it does not say why" if freetds else "TLS failed") +
+             " -- retrying once with certificate checks off (diagnosis only, this run only).")
         DB_TRUST_CERT = True
         try:
             version = str(scalar("SELECT @@VERSION") or "")
         except SystemExit as ex2:
+            if freetds:
+                raise SystemExit(first + "\n  -> Still fails with certificate checks off, so it "
+                                 "is not the certificate: check DBUSER/DBPASS, DBINSTANCE and that "
+                                 "the login may use this database.")
             if "TLS:" in str(ex2):
                 raise SystemExit(first + "\n  -> TrustServerCertificate=yes fails the same way, "
                                  "so DB_TRUST_SERVER_CERT will NOT fix this: it is a TLS protocol "
                                  "mismatch (e.g. a SQL Server without TLS 1.2), not certificate trust.")
             blocker("db", first)
             raise
-        blocker("db", first + "\n  -> Confirmed: it connects with TrustServerCertificate=yes, and "
-                      "the checks below ran that way. Set DB_TRUST_SERVER_CERT=true, or install "
-                      "the issuing CA on the agent.")
+        blocker("db", first + "\n  -> Confirmed: the certificate is the problem -- it connects with "
+                      "certificate checks off, and the checks below ran that way. Set "
+                      "DB_TRUST_SERVER_CERT=true, or install the issuing CA on the agent.")
 
     ok("Connected. %s" % version.split("\n")[0].strip())
     if "Microsoft SQL Server" not in version:

@@ -35,8 +35,8 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
 from gwcommon import (env, env_bool, harden_stdio, explain_import_error, choose_driver,
-                      odbc_quote, explain_connect_error, loki_ssl_context, is_cert_error,
-                      LOKI_CERT_HINT)
+                      explain_connect_error, loki_ssl_context, is_cert_error, LOKI_CERT_HINT,
+                      connection_string, apply_session_options)
 
 harden_stdio()
 
@@ -388,21 +388,16 @@ def connect():
     driver, problem = choose_driver(p.drivers(), DB_DRIVER)
     if problem:
         raise SystemExit(problem)
-    parts = ["DRIVER={%s}" % driver, "SERVER=%s" % DB_SERVER, "DATABASE=%s" % DB_NAME]
-    if DB_TRUSTED:
-        parts.append("Trusted_Connection=yes")
-    else:
-        if not DB_USER:
-            raise SystemExit("Set DB_USER/DB_PASS, or DB_TRUSTED_CONNECTION=true.")
-        parts += ["UID=%s" % odbc_quote(DB_USER), "PWD=%s" % odbc_quote(DB_PASS)]
-    parts.append("Encrypt=yes" if DB_ENCRYPT else "Encrypt=no")
-    if DB_TRUST_CERT:
-        parts.append("TrustServerCertificate=yes")
+    if not DB_TRUSTED and not DB_USER:
+        raise SystemExit("Set DB_USER/DB_PASS, or DB_TRUSTED_CONNECTION=true.")
+    cs = connection_string(driver, DB_SERVER, DB_NAME, DB_USER, DB_PASS, DB_TRUSTED,
+                           DB_ENCRYPT, DB_TRUST_CERT, app="GW-Login-Collector")
     try:
-        cn = p.connect(";".join(parts) + ";", timeout=DB_TIMEOUT)
+        cn = p.connect(cs, timeout=DB_TIMEOUT)
     except p.Error as ex:
         raise SystemExit(explain_connect_error(ex, DB_SERVER, DB_NAME))
     cn.autocommit = False
+    apply_session_options(cn)
     log("ODBC driver      : %s" % driver)
     return cn
 
@@ -522,7 +517,7 @@ def main():
                     cur.execute(UPSERT_DAILY.format(schema=DB_SCHEMA), day, env_label,
                                 product, logins, distinct,
                                 1 if ALLOW_ZERO_OVERWRITE else 0)
-                    written += cur.rowcount or 0
+                    written += max(cur.rowcount, 0)    # -1 = 'unknown' on some drivers
                     if STORE_USERNAMES and (logins > 0 or ALLOW_ZERO_OVERWRITE):
                         cur.execute(DELETE_STALE_USERS.format(schema=DB_SCHEMA),
                                     day, env_label, product)

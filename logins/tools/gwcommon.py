@@ -72,26 +72,41 @@ def explain_import_error(ex):
 DRIVER_RE = re.compile(r"^ODBC Driver (\d+) for SQL Server$")
 
 
+def driver_kind(name):
+    """'msodbc' for Microsoft's driver, 'freetds' for FreeTDS, else 'other'."""
+    if DRIVER_RE.match(name or ""):
+        return "msodbc"
+    if "freetds" in (name or "").lower():
+        return "freetds"
+    return "other"
+
+
 def choose_driver(installed, requested=""):
     """Return (driver_name, problem). Exactly one of them is None.
 
-    With no DB_ODBC_DRIVER set, pick the newest Microsoft 'ODBC Driver NN for
-    SQL Server'. The Windows inbox driver literally named 'SQL Server' is never
-    picked: it predates TLS 1.2 support and the connection options used here.
+    With no DB_ODBC_DRIVER set: the newest Microsoft 'ODBC Driver NN for SQL
+    Server', else FreeTDS. FreeTDS is an open-source driver for SQL Server's
+    TDS protocol that is often already on Linux agents, so it avoids an admin
+    install; Microsoft's driver wins when both exist. The Windows inbox driver
+    literally named 'SQL Server' is never picked: it predates TLS 1.2 and the
+    connection options used here.
     """
     installed = list(installed or [])
     if requested:
         if requested in installed:
             return requested, None
         return None, ("DB_ODBC_DRIVER is '%s' but this agent has: %s. Unset DB_ODBC_DRIVER "
-                      "to pick the newest automatically, or install that driver."
+                      "to pick automatically, or install that driver."
                       % (requested, ", ".join(installed) or "no ODBC drivers"))
     modern = sorted((int(m.group(1)), d) for d in installed for m in [DRIVER_RE.match(d)] if m)
-    if not modern:
-        return None, ("No Microsoft 'ODBC Driver NN for SQL Server' is installed on this agent "
-                      "(found: %s). An admin must install msodbcsql18 -- see DEPLOY.md, "
-                      "'Agent prerequisites'." % (", ".join(installed) or "none"))
-    return modern[-1][1], None
+    if modern:
+        return modern[-1][1], None
+    freetds = [d for d in installed if driver_kind(d) == "freetds"]
+    if freetds:
+        return freetds[0], None
+    return None, ("No ODBC driver for SQL Server on this agent (found: %s). An admin installs "
+                  "either Microsoft's msodbcsql18 or FreeTDS -- see DEPLOY.md, phase 0."
+                  % (", ".join(installed) or "none"))
 
 
 def odbc_quote(value):
@@ -102,6 +117,74 @@ def odbc_quote(value):
     Inside braces the only escape needed is '}' -> '}}'.
     """
     return "{" + str(value).replace("}", "}}") + "}"
+
+
+def odbc_value(value, always_quote):
+    """A connection-string value: brace-quoted always (Microsoft's driver) or
+    only when it has to be (FreeTDS). FreeTDS read braces as literal characters
+    before mid-2022, so a plain 'svc_user' is safer there -- unless the value
+    holds ';', braces or edge spaces, which only quoting can carry."""
+    v = str(value)
+    if always_quote or any(c in v for c in ";{}") or v != v.strip():
+        return odbc_quote(v)
+    return v
+
+
+def connection_string(driver, server, database, user, password, trusted,
+                      encrypt, trust_cert, app=None):
+    """Build the connection string in the dialect of the chosen driver.
+
+    FreeTDS, checked against its source (src/odbc/connectparams.c, src/tds/tls.c):
+      * SERVER takes host, host,port or host\\instance; 'tcp:' is not understood.
+      * Encryption=require|off. Its 'Encrypt' alias only exists since 2024.
+      * With Encryption=require it does NOT verify the certificate unless
+        ServerCertificate names a CA file or 'system' (the OS trust store), so
+        ServerCertificate=system is how DB_TRUST_SERVER_CERT=false is honoured.
+      * TrustServerCertificate is not a FreeTDS keyword (it would be ignored).
+      * TDS_Version=7.4 (SQL Server 2012+) so DATE/DATETIME2 travel as real
+        types; ClientCharset=UTF-8 for non-ASCII usernames.
+    """
+    kind = driver_kind(driver)
+    quote_all = kind != "freetds"
+    parts = ["DRIVER={%s}" % driver]
+    if kind == "freetds":
+        host, port, instance = parse_server(server)
+        target = host + ("\\" + instance if instance else "") + ("," + str(port) if port else "")
+        parts += ["SERVER=%s" % target, "DATABASE=%s" % odbc_value(database, False),
+                  "TDS_Version=7.4", "ClientCharset=UTF-8"]
+    else:
+        parts += ["SERVER=%s" % server, "DATABASE=%s" % database]
+    if trusted:
+        parts.append("Trusted_Connection=yes")
+    else:
+        parts += ["UID=%s" % odbc_value(user, quote_all),
+                  "PWD=%s" % odbc_value(password, quote_all)]
+    if kind == "freetds":
+        parts.append("Encryption=%s" % ("require" if encrypt else "off"))
+        if encrypt and not trust_cert:
+            parts.append("ServerCertificate=system")
+    else:
+        parts.append("Encrypt=yes" if encrypt else "Encrypt=no")
+        if trust_cert:
+            parts.append("TrustServerCertificate=yes")
+    if app:
+        parts.append("APP=%s" % app)
+    return ";".join(parts) + ";"
+
+
+# Set on every connection, whatever the driver's defaults. SQL Server refuses
+# INSERT/UPDATE/MERGE on a table with an index on a computed column (day_ts)
+# unless these are exactly so. Microsoft's driver sets them itself; FreeTDS
+# makes no such promise.
+SESSION_OPTIONS_SQL = ("SET QUOTED_IDENTIFIER ON; SET ANSI_NULLS ON; SET ANSI_PADDING ON; "
+                       "SET ANSI_WARNINGS ON; SET ARITHABORT ON; SET CONCAT_NULL_YIELDS_NULL ON; "
+                       "SET NUMERIC_ROUNDABORT OFF;")
+
+
+def apply_session_options(cn):
+    cur = cn.cursor()
+    cur.execute(SESSION_OPTIONS_SQL)
+    cur.close()
 
 
 def parse_server(value):
@@ -150,6 +233,10 @@ def explain_connect_error(ex, server, database):
     if "kerberos" in low or "gss" in low or "sspi" in low:
         hints.append("Integrated auth on Linux means Kerberos, which needs a ticket for the agent "
                      "account. Use SQL auth: DB_TRUSTED_CONNECTION=false.")
+    if not hints and "freetds" in low:
+        hints.append("FreeTDS reports most failures as 'unable to connect' with no reason -- "
+                     "wrong credentials, an untrusted certificate and a blocked port look the "
+                     "same. 'check' retries without certificate checks to tell them apart.")
     if not hints and ("timeout" in low or "tcp provider" in low or "network" in low):
         hints.append("Network: the agent could not reach SQL Server in time.")
     out = "Could not connect to %s / %s:\n  %s" % (server, database, text)

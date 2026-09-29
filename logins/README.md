@@ -148,8 +148,10 @@ agent needs, once, from an admin with root — exact commands in
   agent's tool cache and fails on self-hosted agents, so `prepare_python.sh`
   tries each `python3.x` on `PATH` — one that already has pyodbc first, then
   newest first — until one can build a venv.
-- **Microsoft ODBC Driver 18** (`msodbcsql18`), which pulls in unixODBC. The
-  pipeline can't install it — it needs root and a EULA acceptance.
+- **An ODBC driver for SQL Server** — Microsoft's `msodbcsql18` (preferred), or
+  **FreeTDS**, which many Linux agents already have. The code picks Microsoft's
+  when present, else FreeTDS, and speaks each one's connection-string dialect.
+  The pipeline can't install either — that needs root.
 - **A route to PyPI**, an internal mirror (`PIP_INDEX_URL`), or the OS
   `python3-pyodbc` package. pyodbc goes into a job-local venv, which sidesteps
   PEP 668 on newer Debian/Ubuntu and RHEL 8's too-old system pip.

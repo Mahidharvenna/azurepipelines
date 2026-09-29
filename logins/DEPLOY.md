@@ -35,12 +35,18 @@ file it needs is committed.
 |---|---|---|
 | Python **3.9+** | pyodbc wheels, `zoneinfo` | `Prepare Python` fails: *No Python >= 3.9 found* |
 | Python's `venv` module | job-local installs; system pip is blocked by PEP 668 on newer Debian/Ubuntu and too old on RHEL 8 | `Prepare Python` fails: *Could not create a virtualenv* |
-| **Microsoft ODBC Driver 18** (`msodbcsql18`) | the SQL Server driver; installing it pulls in unixODBC (`libodbc.so.2`) | `check` fails: *cannot load the unixODBC library* |
+| An ODBC driver for SQL Server: **Microsoft's `msodbcsql18`** (preferred) **or FreeTDS** | talks to SQL Server; either brings unixODBC (`libodbc.so.2`) | `check` fails: *No ODBC driver for SQL Server* |
 | Route to PyPI, **or** an internal mirror | installs pyodbc into the job venv | `Prepare Python` warns; `check` fails. See 0.4 |
 | Internal CA in the OS trust store | only if Loki or SQL Server use an internal CA | `check` fails with a certificate error |
 
-The ODBC driver cannot be installed by the pipeline: it needs root and accepting
-Microsoft's EULA. That's the one piece of admin work this design can't avoid.
+**Already have FreeTDS?** Many Linux agents do — `check` lists the ODBC drivers it
+finds. If FreeTDS is there, skip the driver install below: the pipelines use it
+automatically, and switch to Microsoft's driver by themselves once it appears.
+FreeTDS is a mature open-source driver for SQL Server; Microsoft's is preferred
+only because it's the vendor's own and gives clearer error messages.
+
+Otherwise the driver is the one piece of admin work this design can't avoid:
+it needs root, and Microsoft's needs a EULA acceptance.
 
 ### 0.2 Install — RHEL / Rocky / Alma 8 or 9
 
@@ -74,7 +80,8 @@ sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
 `python3.9 python3.9-venv` as well; `Prepare Python` picks it up. Debian 10 and
 older have no 3.9 package and are past end of life; upgrade the agent's OS.
 
-**Check**, on either distro — it should list `ODBC Driver 18 for SQL Server`:
+**Check**, on either distro — it should list `ODBC Driver 18 for SQL Server`
+(or `FreeTDS`):
 
 ```bash
 odbcinst -q -d
@@ -198,7 +205,7 @@ override it:
 | `DB_TRUST_SERVER_CERT` | `false` | **Likely needed** if the SQL certificate comes from an internal CA you haven't added to the agent (0.5). Driver 18 encrypts by default. `check` says so. |
 | `LOKI_CA_BUNDLE` | — | Loki uses an internal CA and you can't add it to the OS store. Path to a `.pem` on the agent. |
 | `PIP_INDEX_URL` / `HTTPS_PROXY` | — | The agent can't reach PyPI (0.4). |
-| `DB_ODBC_DRIVER` | newest installed | You need a specific driver. `check` lists what's there. |
+| `DB_ODBC_DRIVER` | newest Microsoft driver, else FreeTDS | You need a specific driver. `check` lists what's there. |
 | `DB_ENCRYPT` | `true` | Rarely. Prefer `DB_TRUST_SERVER_CERT`. |
 | `DB_TRUSTED_CONNECTION` | `false` | Leave it. On Linux it means Kerberos and needs a ticket for the agent account. |
 | `LOOKBACK_DAYS` | `7` | Longer self-healing window. |
@@ -418,8 +425,9 @@ exists; two prove the *only if source changed* box is unticked.
 | `No Python >= 3.9 found` | Python missing or too old, or outside the agent's `.path` | 0.2 / 0.3, then 0.6 |
 | `None of the Python interpreters above could create a virtualenv` | Debian/Ubuntu without `python3-venv` | 0.3 |
 | `pip could not install pyodbc` | no route to PyPI | 0.4 |
-| `cannot load the unixODBC library` | `msodbcsql18` not installed | 0.2 / 0.3 |
-| `No Microsoft 'ODBC Driver NN for SQL Server'` | same | same |
+| `cannot load the unixODBC library` | no SQL Server ODBC driver installed | 0.2 / 0.3 |
+| `No ODBC driver for SQL Server on this agent` | neither Microsoft's driver nor FreeTDS | 0.2 / 0.3, or `dnf install freetds` (EPEL) / `apt-get install tdsodbc` |
+| `[FreeTDS]… Unable to connect` | FreeTDS gives no reason for any failure | read the next line of `check` — it retries to say whether it's the certificate |
 | `SSL Provider: [error:…:certificate verify failed…]` (Linux) or `certificate chain was issued by an authority that is not trusted` (Windows) | SQL Server uses an internal CA | 0.5, or `DB_TRUST_SERVER_CERT=true` — `check` confirms which works |
 | `TrustServerCertificate=yes fails the same way` | TLS protocol mismatch, not trust — e.g. an old SQL Server without TLS 1.2 | patch SQL Server; the setting won't help |
 | `The collector runs as '…', which lacks: INSERT on …` | `DBUSER` created the tables but can't write them | a DBA grants it (e.g. `db_datawriter`) |
