@@ -169,8 +169,8 @@ GO
 
 -- -----------------------------------------------------------------------------
 -- gw_login_daily -- one row per (project, day, env, product). The grain the
--- dashboard reads. [day] is a calendar day in REPORT_TIMEZONE, matching the
--- emailed report; if that variable is unset both use UTC.
+-- dashboard reads. [day] is a calendar day in REPORT_TIMEZONE; UTC if that
+-- variable is unset.
 -- -----------------------------------------------------------------------------
 IF OBJECT_ID('dbo.gw_login_daily', 'U') IS NULL
 BEGIN
@@ -235,7 +235,7 @@ BEGIN
         -- case-insensitive database collation 'JSmith' and 'jsmith' would hit
         -- the same key, the second MERGE would overwrite the first, and logins
         -- would vanish without an error. BIN2 makes the key, the PK and
-        -- COUNT(DISTINCT username) agree with the collector and the report.
+        -- COUNT(DISTINCT username) agree with the collector.
         username     NVARCHAR(128) COLLATE Latin1_General_100_BIN2 NOT NULL,
         logins       INT           NOT NULL,
         collected_at DATETIME2(0)  NOT NULL

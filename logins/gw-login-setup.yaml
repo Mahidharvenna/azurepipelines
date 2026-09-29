@@ -67,16 +67,13 @@ variables:
 # than copied, so the password lives in one place. The env block below maps
 # its names. Needs DBINSTANCE, DBNAME, DBUSER, DBPASS.
 - group: 'Dashboard DB'
-# Shared with reports/gw-monthly-login-report.yaml ON PURPOSE. LOKI_PROJECT,
-# LOGIN_USER_REGEX, REPORT_TIMEZONE, ENVS and PRODUCT_JOBS must be identical in
-# both jobs or the dashboard silently stops reconciling with the spreadsheet --
-# one group makes drift impossible. Collector-only settings (LOKI_PROJECTS,
-# LOOKBACK_DAYS, DB_ENCRYPT, ...) all have working defaults; add them here
-# only to override. 'check' compares LOKI_PROJECTS with the projects Loki has,
-# and 'schema' tags rows that predate the project column with LOKI_PROJECT,
-# the one project collected before. The group also holds SMTP secrets; they
-# are never mapped into this job's env, and ADO does not expose an unmapped
-# secret to a script.
+# The existing group with the Loki settings, the same one the collector
+# reads. Collector-only settings (LOKI_PROJECTS, LOOKBACK_DAYS, DB_ENCRYPT,
+# ...) all have working defaults; add them here only to override. 'check'
+# compares LOKI_PROJECTS with the projects Loki has, and 'schema' tags rows
+# that predate the project column with LOKI_PROJECT, the one project
+# collected before. Any other secrets in the group are never mapped into this
+# job's env, and ADO does not expose an unmapped secret to a script.
 - group: 'gw-reports-secrets'
 
 steps:

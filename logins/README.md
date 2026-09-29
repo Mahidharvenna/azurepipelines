@@ -4,11 +4,6 @@ Daily job that copies login counts (and the usernames behind them) out of Loki
 into SQL Server — one or several Loki projects per run — plus a Grafana
 dashboard that reads SQL Server instead of Loki.
 
-Companion to [`../reports/`](../reports/), not a replacement: the report emails a
-monthly spreadsheet, this gives a dashboard with unbounded history. Both share
-the same Loki selector, the same `LOGIN_USER_REGEX` and the same
-`REPORT_TIMEZONE`, so their numbers reconcile.
-
 ## Why
 
 Loki retains ~30 days. Anything reading it directly inherits that ceiling —
@@ -77,8 +72,10 @@ overwrite each other.
 
 ## Configuration
 
-Every variable the report understands works here too. Set them in the same two
-places (see `DEPLOY.md`); the ones unique to the collector are:
+The Loki, scope and timezone settings (`LOKI_URL`, `LOKI_PROJECT`, `ENVS`,
+`PRODUCTS`, `LOGIN_USER_REGEX`, `REPORT_TIMEZONE`, ...) come from the
+`gw-reports-secrets` group (see `DEPLOY.md`); these have working defaults and
+need setting only to override:
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -103,8 +100,7 @@ value Loki doesn't have stops the run and lists the ones it has. It's a text
 box, not a list, so no project name is written into the YAML. Scheduled runs
 can't pass parameters, so they always run `all`.
 
-The dashboard's *Project* dropdown filters every panel. The monthly report
-reads `LOKI_PROJECT` only, so it reconciles with that one project.
+The dashboard's *Project* dropdown filters every panel.
 
 Tables made before the `project` column are upgraded in place by setup's
 `schema`, their rows tagged with `LOKI_PROJECT`. [`DEPLOY.md`](DEPLOY.md),
@@ -132,10 +128,10 @@ late-arriving log self-heals without anyone intervening.
 
 ## Paging, not truncation
 
-`monthly_report.py` warns when a chunk hits Loki's entry cap and moves on —
-reasonable, because it runs again next month. The collector pages instead: it
-resumes from the last entry until the day is exhausted. A silently short day
-here would be wrong permanently.
+Loki caps how many entries one query returns. The collector doesn't warn and
+move on when a day hits the cap: it pages, resuming from the last entry until
+the day is exhausted. These tables are the only permanent copy, so a silently
+short day would be wrong forever.
 
 ## Setting it up without local tooling
 
@@ -184,7 +180,7 @@ agent needs the following — usually already there; details in
   client (FreeTDS compiled in, plus OpenSSL and Kerberos), the way .NET's
   `System.Data.SqlClient` does for PowerShell tasks — nothing needs root.
 - **Network** to Loki (`:3100`) and SQL Server (`:1433`). `BYPASS_PROXY=true`
-  (the default) skips the system proxy for Loki, matching the report.
+  (the default) skips the system proxy for Loki.
 - **Loki on an internal CA?** Linux Python trusts only the OpenSSL bundle, not
   a Windows store: add the CA to the OS store, or set `LOKI_CA_BUNDLE`. SQL
   Server's certificate is not verified, so it needs nothing.

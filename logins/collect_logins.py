@@ -7,10 +7,6 @@ per-day login counts (and the usernames behind them) into SQL Server, which
 keeps them forever. Grafana then reads SQL Server instead of Loki, so a
 dashboard can show years of history.
 
-Shares its conventions with reports/monthly_report.py -- same env() handling,
-same selector, same timezone treatment, same LOGIN_USER_REGEX -- so the stored
-numbers reconcile with the emailed report.
-
 Standard library only, except pymssql for the database (its wheel carries its
 own SQL Server client -- no ODBC driver needed).
 
@@ -192,8 +188,8 @@ for p in PRODUCTS:
 
 
 # --------------------------------------------------------------------------
-# timezone -- must match monthly_report.py, or the dashboard and the emailed
-# report will bucket the same login into different days.
+# timezone -- REPORT_TIMEZONE sets the calendar days logins are bucketed into
+# (UTC when unset). Changing it later shifts the day boundaries of new rows.
 # --------------------------------------------------------------------------
 REPORT_TZ = env("REPORT_TIMEZONE")
 _EASTERN = {"eastern standard time", "america/new_york", "et", "est", "edt", "eastern"}
@@ -302,9 +298,8 @@ def fetch_day_events(project, day_local, env_label, product):
     Every login event for one project / local calendar day / env / product,
     as a list of (local_datetime, username).
 
-    Pages through Loki rather than warning about truncation. The report can
-    afford to warn and move on -- it runs again next month. This table is the
-    only permanent copy, so a silently short day would be wrong forever.
+    Pages through Loki rather than warning about truncation: this table is
+    the only permanent copy, so a silently short day would be wrong forever.
     """
     meta = PRODUCT_META[product]
     sel = "%s |= `User Login`" % selector(project, meta["job"], env_label, meta["frag"])

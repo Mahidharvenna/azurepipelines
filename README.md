@@ -1,21 +1,13 @@
-# Guidewire login reporting
+# Guidewire login history
 
-Two ways of answering "who is using which environment", both reading the same
-`User Login` events out of Loki.
+Answers "who is using which environment" from the `User Login` events in
+Loki: a daily collector copies them into SQL Server, and a Grafana dashboard
+reads SQL Server — [`logins/`](logins/).
 
-| | What it does | Output |
-|---|---|---|
-| [`logins/`](logins/) | Daily collector → SQL Server → Grafana | A dashboard with unbounded history |
-| [`reports/`](reports/) | Monthly query → Excel → email | A spreadsheet in your inbox |
+## Why
 
-They share their Loki selector, `LOGIN_USER_REGEX` and `REPORT_TIMEZONE`
-settings, so their numbers reconcile.
-
-## Why there are two
-
-Loki retains about 30 days. Anything querying it directly inherits that ceiling —
-the monthly report needs ≥32 days of retention just to see its own reporting
-period, and "logins over the last year" is not answerable from it at all.
+Loki retains about 30 days. Anything querying it directly inherits that
+ceiling — "logins over the last year" is not answerable from it at all.
 
 `logins/` fixes that by decoupling collection from presentation:
 
@@ -39,7 +31,6 @@ nobody purges, so history grows indefinitely.
   checks, then a four-run test ladder.
 - **How the collector works** → [`logins/README.md`](logins/README.md) — tables,
   configuration, and the safeguards that protect the stored history.
-- **The emailed report** → [`reports/README.md`](reports/README.md).
 
 ## A note on the data
 

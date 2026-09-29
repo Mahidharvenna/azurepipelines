@@ -243,8 +243,8 @@ def loki_ssl_context(verify, ca_bundle, warn):
     """Build the TLS context for Loki calls.
 
     Python trusts the Windows certificate store on Windows, but only the
-    OpenSSL bundle on Linux -- so an internal CA that 'just worked' for the
-    Windows-hosted report fails here. LOKI_CA_BUNDLE is ADDED to the default
+    OpenSSL bundle on Linux -- so an internal CA that 'just worked' for a
+    Windows-hosted job fails here. LOKI_CA_BUNDLE is ADDED to the default
     trust rather than replacing it, and a path that doesn't exist on this agent
     is ignored with a warning, so one shared variable group can't break an
     agent of the other OS. An unreadable or non-PEM file is also ignored with a

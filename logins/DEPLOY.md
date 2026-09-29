@@ -144,25 +144,20 @@ password lives in one place. It supplies `DBINSTANCE`, `DBNAME`, `DBUSER` and
 `DBPASS` (secret). `DBINSTANCE` takes SQL Server's own
 syntax — `host`, `host,port`, or `host\instance` — never `host:port`.
 
-**`gw-reports-secrets`** — the monthly report's group, **shared on purpose**.
-Every value the collector must agree with the report on already lives there:
+**`gw-reports-secrets`** — the existing group with the Loki settings, used
+as-is. What the collector reads from it:
 
-| Already in the group | Why it must be shared |
+| In the group | What it decides |
 |---|---|
-| `LOKI_URL`, `LOKI_PROJECT`, `LOKI_VERIFY_TLS`, `BYPASS_PROXY` | same Loki, same selector |
-| `ENVS`, `ENVS_EXCLUDE`, `PRODUCTS`, `PRODUCT_JOBS`, `PRODUCT_FRAGS` | same streams |
-| `LOGIN_USER_REGEX` | same usernames |
-| `REPORT_TIMEZONE`, `REPORT_TZ_LABEL` | same day boundaries |
-
-A copy would work on day one and drift afterwards: tune the regex in one group
-and the dashboard silently stops reconciling with the spreadsheet. One group
-makes that impossible.
+| `LOKI_URL`, `LOKI_PROJECT`, `LOKI_VERIFY_TLS`, `BYPASS_PROXY` | which Loki, which project |
+| `ENVS`, `ENVS_EXCLUDE`, `PRODUCTS`, `PRODUCT_JOBS`, `PRODUCT_FRAGS` | which streams |
+| `LOGIN_USER_REGEX` | how usernames are read |
+| `REPORT_TIMEZONE`, `REPORT_TZ_LABEL` | day boundaries |
 
 > **`LOKI_PROJECT` especially.** The collector falls back to it while
 > `LOKI_PROJECTS` is unset. If both are missing the code falls back to the
 > placeholder `myproject`, Loki matches nothing, and every count is a
-> successful-looking **0** — `check` stops on it. If the report works, the
-> group already has it.
+> successful-looking **0** — `check` stops on it.
 
 **Nothing new has to be added** for a single project. Every collector-only
 setting has a working default, and an undefined `$(NAME)` is treated as unset.
@@ -180,7 +175,7 @@ Add one only to override it:
 | `LOKI_LOG_LIMIT` | `5000` | Rarely; paging makes it a performance knob, not a correctness one. |
 | `STORE_USERNAMES` | `true` | You decide not to keep user identifiers. |
 
-The group also holds the report's SMTP secrets. Those are never mapped into
+Any other secrets in the group (e.g. old SMTP settings) are never mapped into
 either job's `env:` block, and ADO does not expose an unmapped secret to a
 script, so the collector never sees them.
 
@@ -345,8 +340,8 @@ The header prints `Projects : …`; each project then gets a
   `job` label. Zeros — or `found no 'env' label values` — for one project
   only → that project's value.
 
-The header also prints `Day boundaries : … (<rule>)`. It must match what the
-report uses — see *Reconcile* in phase 5.
+The header also prints `Day boundaries : … (<rule>)` — the timezone days are
+bucketed in (`REPORT_TIMEZONE`; UTC when unset).
 
 ### Test 2 — Database write path *(one day)*
 
@@ -364,8 +359,8 @@ Loki holds ~30 days right now; whatever you don't capture is gone.
 
 **Run → `Backfill start` = 30 days ago, `Backfill end` left at `none` → Run.**
 
-Expect this to take noticeably longer than the report: it pulls raw log lines
-rather than counts, because that's what usernames require.
+Expect this to take several minutes: it pulls raw log lines rather than
+counts, because that's what usernames require.
 
 ### Test 4 — Verify
 
@@ -407,25 +402,6 @@ which SQL Server rejects.
 **Check** at *Last 90 days*: all three dropdowns populated, daily series drawn
 — one per `project / env` — *Collector lag* green at **1**, *Most active users*
 populated, *Collector runs* green.
-
-### Reconcile against the report
-
-Run `monthly_report.py` for a month that's fully inside the collected range and
-compare totals, with *Project* set to the report's `LOKI_PROJECT` — the report
-covers that one project only. They should match closely — both count events
-from the same `|= "User Login"` match, both bucket days in `REPORT_TIMEZONE`,
-and the report already labels each `count_over_time` sample with
-`timestamp - 1d`.
-
-Remaining differences are worth chasing, not shrugging at. The usual causes:
-
-- **The two jobs resolved `REPORT_TIMEZONE` differently.** The built-in Eastern
-  names (`Eastern Standard Time`, `America/New_York`, `ET`, `EST`, `EDT`,
-  `Eastern`) behave identically everywhere. Any other name goes through Python's
-  `zoneinfo`, which on a **Windows** agent without the `tzdata` package falls back
-  to UTC. If the report runs on Windows, use one of the built-in names.
-- The report running with `INCLUDE_USER_DETAIL=false`, which counts via a
-  different query.
 
 ---
 
@@ -552,7 +528,7 @@ rebuild, so they are kept and tagged with that one project.
 | `No tools/prepare_python.sh anywhere in this repo` | the folder was copied in but new files never `git add`-ed | `git add <folder>`, commit, push |
 | `Missing from the checked-out repo: …` | same, for the files named | same |
 | `Found N copies of tools/prepare_python.sh` | the folder exists twice | delete the stale copy, or set a pipeline variable `LOGINS_DIR` to the one to use |
-| `Unable to locate executable file: 'pwsh'` | a PowerShell step ran on a Linux agent | the `logins/` YAMLs are bash-only now — pull them. The monthly report's YAML still has a PowerShell step and fails the same way on a Linux agent |
+| `Unable to locate executable file: 'pwsh'` | a PowerShell step ran on a Linux agent | the `logins/` YAMLs are bash-only now — pull them |
 | `No agent found in pool DevopsAutomation which satisfies the specified demands` | no online Linux agent in that pool | bring one online, or check the agent's `Agent.OS` capability |
 | `No Python >= 3.9 found` | Python missing or too old, or outside the agent's `.path` | 0.2, then 0.5 |
 | `None of the Python interpreters above could create a virtualenv` | Debian/Ubuntu without `python3-venv` | 0.2 |
@@ -598,5 +574,3 @@ sqlcmd -S <server> -d <database> -Q "DROP VIEW IF EXISTS dbo.gw_login_monthly; D
    SCHEMA::dbo` rights from phase 2, revoke them (the `REVOKE` lines there).
    Its rights on the three tables go with the tables.
 
-The monthly report is untouched throughout — it reads Loki directly and has no
-dependency on any of this.
