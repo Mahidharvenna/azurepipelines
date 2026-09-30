@@ -1,0 +1,226 @@
+# Disk-Cleanup: shows where the disk space went on Linux servers and, when
+# asked, removes only well-understood files -- rotated logs, JVM crash logs,
+# old WAR backups, JVM heap dumps and core files -- older than an age per kind.
+#
+# Default is report-only: nothing on the servers changes. Pick 'clean' only
+# after reading a report for the same servers. The rules and safety guards are
+# in disk_cleanup.sh and disk-cleanup/README.md.
+#
+# Each server is reached through its existing SSH service connection (the ones
+# the deploy pipelines use) and the script runs as that connection's user.
+#
+# Register: Pipelines -> New pipeline -> this repo -> Existing Azure Pipelines
+# YAML file -> choose the branch that holds this file -> this file; then rename
+# the pipeline Disk-Cleanup. Manual runs use the pipeline's default branch, so
+# set that to the same branch (Edit -> ... -> Triggers -> YAML -> Get sources ->
+# default branch for manual and scheduled builds), or pick the branch in the
+# Run dialog every time.
+#
+# First run against a new service connection: "This pipeline needs permission
+# to access a resource". The whole run waits, with nothing started, until
+# someone chooses Permit for each new connection; that is once per connection.
+# A mistyped connection name fails the whole run at queue time, before any
+# server is contacted.
+#
+# No schedules: block on purpose. A scheduled run uses the parameter defaults,
+# and the default server list is empty, so it would only fail. Scheduling clean
+# mode is not recommended unless a fixed, reviewed server list is made the
+# default first -- a list typed at queue time is the review.
+trigger: none
+pr: none
+
+name: 'Disk-Cleanup-$(Date:yyyyMMdd).$(Rev:r)'
+
+parameters:
+# A list rather than a text box so each server gets its own step and its own
+# result. ADO Server 2022's Run dialog edits a list as YAML text: replace []
+# with one line per SSH service connection, e.g.
+#   - DEV2-PC
+#   - DEV4-CM
+- name: servers
+  displayName: 'Servers: SSH service connection names, one per line as "- NAME"'
+  type: object
+  default: []
+- name: mode
+  displayName: 'Mode: report writes nothing; clean deletes files the rules match'
+  type: string
+  default: report
+  values:
+  - report
+  - clean
+- name: roots
+  displayName: 'Directories to scan: absolute paths, space-separated'
+  type: string
+  default: '/opt /var/app/logs'
+- name: logDays
+  displayName: 'Rotated logs and JVM crash logs: older than N days'
+  type: number
+  default: 60
+- name: warDays
+  displayName: 'WAR backups in webapps: made more than N days ago (the newest of each component is always kept)'
+  type: number
+  default: 5
+- name: dumpDays
+  displayName: 'Heap dumps and core files: older than N days'
+  type: number
+  default: 7
+- name: exclude
+  displayName: 'Never clean paths matching these globs, space-separated (default keeps the ab component''s logs, as the deploy does; none = no exclusions)'
+  type: string
+  default: '*/ab/*'
+- name: trimCatalinaOutOverMB
+  displayName: 'Clean only: trim catalina.out over N MB, keeping its last 20 MB; not trimmed if that copy cannot be made (0 = off)'
+  type: number
+  default: 0
+- name: useSudo
+  displayName: 'Use sudo -n on the servers (needs passwordless sudo for the SSH user)'
+  type: boolean
+  default: false
+
+jobs:
+- job: DiskCleanup
+  displayName: 'Disk ${{ parameters.mode }}'
+  # Each server step has its own 60-minute limit, so this covers six servers
+  # even if every one runs to its limit (plus the few minutes of set-up steps).
+  # Split a longer list of big, slow servers over several runs.
+  timeoutInMinutes: 370
+  # ADO Server 2022 RTW rejects a template expression on pool.name, so this is a
+  # literal. No OS demand: SSH@0 works from any agent OS. The agent must reach
+  # each server on port 22 -- the agents the deploy pipelines use already do.
+  # The two helper steps are bash, which a Windows agent gets from Git for Windows.
+  pool:
+    name: DevopsAutomation
+
+  steps:
+  - checkout: self
+    clean: true
+
+  # Compile time: an empty list would produce no server steps and a green run
+  # that did nothing. Fail loudly instead.
+  - ${{ if eq(length(parameters.servers), 0) }}:
+    - bash: |
+        echo "##vso[task.logissue type=error]No servers given. In the Run dialog, replace [] under Servers with one line per SSH service connection, for example:"
+        echo "  - DEV2-PC"
+        echo "  - DEV4-CM"
+        exit 1
+      displayName: 'No servers given'
+
+  # SSH@0 hands 'args' to the server's shell, so a quote, $ or ; in Roots or
+  # Exclude would run as a command there. Allow path and glob characters only,
+  # and fail once here rather than once per server. The script re-checks
+  # everything itself. Values arrive through env, never pasted into the script
+  # text.
+  - bash: |
+      bad=0
+      err() { echo "##vso[task.logissue type=error]$1"; bad=1; }
+      case "$ROOTS" in
+        *[!A-Za-z0-9._/,+@\ -]*) err "Roots: use only letters, digits, / . _ - + @, spaces and commas." ;;
+      esac
+      case "$ROOTS" in
+        *[!\ ,]*) ;;
+        *) err "Roots is empty." ;;
+      esac
+      case "$EXCLUDE" in
+        *[!]A-Za-z0-9/._*?[\ ,-]*) err "Exclude: use only letters, digits, / . _ - * ? [ ], spaces and commas (none = no exclusions)." ;;
+      esac
+      case "$EXCLUDE" in
+        *[!\ ,]*) ;;
+        *) err "Exclude is empty; use none for no exclusions." ;;
+      esac
+      min=0
+      [ "$MODE" = clean ] && min=1
+      for pair in "logDays=$LOG_DAYS" "warDays=$WAR_DAYS" "dumpDays=$DUMP_DAYS"; do
+        name=${pair%%=*}; val=${pair#*=}
+        case "$val" in
+          ''|*[!0-9]*) err "$name must be a whole number of days."; continue ;;
+        esac
+        # 10#: a leading zero would otherwise read as octal.
+        if [ $((10#$val)) -lt "$min" ] || [ $((10#$val)) -gt 3650 ]; then
+          err "$name must be from $min to 3650 in $MODE mode."
+        fi
+      done
+      case "$TRIM_MB" in
+        ''|*[!0-9]*) err "trimCatalinaOutOverMB must be a whole number of MB (0 = off)." ;;
+        *) [ ${#TRIM_MB} -le 7 ] && [ $((10#$TRIM_MB)) -le 1048576 ] ||
+             err "trimCatalinaOutOverMB must be from 0 to 1048576 (0 = off)." ;;
+      esac
+      [ "$bad" -eq 0 ] || exit 1
+      echo "Mode       : $MODE"
+      echo "Roots      : $ROOTS"
+      echo "Ages (days): logs and crash logs $LOG_DAYS, WAR backups $WAR_DAYS, heap dumps and cores $DUMP_DAYS"
+      echo "Exclude    : $EXCLUDE"
+      echo "catalina   : trim over $TRIM_MB MB (0 = off; clean mode only)"
+      if [ "$MODE" = clean ]; then
+        echo "##vso[task.logissue type=warning]Clean mode: files matching the rules will be deleted on every listed server."
+      fi
+    displayName: 'Check parameters'
+    env:
+      MODE:      ${{ parameters.mode }}
+      ROOTS:     ${{ parameters.roots }}
+      LOG_DAYS:  ${{ parameters.logDays }}
+      WAR_DAYS:  ${{ parameters.warDays }}
+      DUMP_DAYS: ${{ parameters.dumpDays }}
+      EXCLUDE:   ${{ parameters.exclude }}
+      TRIM_MB:   ${{ parameters.trimCatalinaOutOverMB }}
+
+  # Find the script instead of assuming where this folder sits in the repo:
+  # disk-cleanup/ at the root today, but it may move deeper. Two copies is an
+  # error rather than a guess -- one of them is stale. Same approach as the
+  # logins pipelines' locate step.
+  - bash: |
+      hits=`git ls-files -- '*disk-cleanup/disk_cleanup.sh'`
+      n=`printf '%s\n' "$hits" | grep -c .`
+      if [ "$n" -eq 0 ]; then
+        echo "##vso[task.logissue type=error]No disk-cleanup/disk_cleanup.sh in this repo. Commit it -- git only picks up new files when you git add them."
+        exit 1
+      fi
+      if [ "$n" -gt 1 ]; then
+        echo "##vso[task.logissue type=error]Found $n copies of disk-cleanup/disk_cleanup.sh: `echo $hits`. Delete the stale ones."
+        exit 1
+      fi
+      path="$BUILD_SOURCESDIRECTORY/$hits"
+      # bash on the server rejects CRLF ("$'\r': command not found").
+      # .gitattributes prevents it; this catches a copy that slipped past.
+      if grep -q "`printf '\r'`" "$path"; then
+        echo "##vso[task.logissue type=error]$hits has Windows (CRLF) line endings. Re-commit it with LF; disk-cleanup/.gitattributes enforces that."
+        exit 1
+      fi
+      # A syntax error should fail once here, not once per server.
+      bash -n "$path" || { echo "##vso[task.logissue type=error]$hits has a bash syntax error (above)."; exit 1; }
+      echo "Cleanup script: $hits"
+      # Read-only: nothing later in the run can repoint the script.
+      echo "##vso[task.setvariable variable=CLEANUP_SCRIPT;isreadonly=true]$path"
+    displayName: 'Locate cleanup script'
+    workingDirectory: '$(Build.SourcesDirectory)'
+
+  # One step per server, so each has its own log and result. continueOnError:
+  # an unreachable server, or failures on one (exit 1), must not stop the rest;
+  # the run then ends "partially succeeded" with that step marked.
+  # A step's log is complete only if it ends with "SUMMARY <host>:". SSH@0 can
+  # show green for a run cut off by a dropped connection or a killed process.
+  - ${{ each server in parameters.servers }}:
+    - task: SSH@0
+      displayName: 'Disk ${{ parameters.mode }}: ${{ server }}'
+      continueOnError: true
+      # The script's capped report sections take at most 18 minutes for two
+      # roots; the rest is for the rules on a large tree.
+      timeoutInMinutes: 60
+      inputs:
+        sshEndpoint: ${{ server }}
+        # 'script' copies the file to ~/disk_cleanup.sh in the SSH user's
+        # home, runs it, then removes that path.
+        runOptions: script
+        scriptPath: '$(CLEANUP_SCRIPT)'
+        # Roots and Exclude quoted for the server's shell (no globbing there);
+        # 'Check parameters' guarantees they hold no quote.
+        args: >-
+          --mode ${{ parameters.mode }}
+          --roots '${{ parameters.roots }}'
+          --log-days ${{ parameters.logDays }}
+          --war-days ${{ parameters.warDays }}
+          --dump-days ${{ parameters.dumpDays }}
+          --exclude '${{ parameters.exclude }}'
+          --trim-catalina-mb ${{ parameters.trimCatalinaOutOverMB }}
+          --sudo ${{ parameters.useSudo }}
+        failOnStdErr: false
+        readyTimeout: '20000'
