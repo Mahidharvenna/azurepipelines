@@ -33,6 +33,29 @@ project.
                  what scheduled runs get) = every LOKI_PROJECTS entry, in
                  order; otherwise one label value -- e.g. to backfill a new
                  project before LOKI_PROJECTS lists it.
+
+What is read
+------------
+  ENVS              comma list of env labels, or ALL to ask Loki per project.
+                    Default DEV1.
+  ENVS_EXCLUDE      envs to skip under ALL.
+  PRODUCTS          centres: any of pc, bc, cc, cm. Default pc.
+  PRODUCT_JOBS      comp=job overrides, e.g. cm=ablogs.
+  PRODUCT_FRAGS     comp=fragment overrides; a stream's filename must match
+                    .*<fragment>.log, e.g. pc=UserAction.
+  LOGIN_USER_REGEX  reads the username out of a 'User Login' line; needs a
+                    (?<user>...) group. The default reads both
+                    'User Login: jsmith' and 'User Login {user="jsmith", ...}'.
+
+Projects don't all log alike, so each of these six can be set for one project:
+<NAME>_<KEY> replaces <NAME> for that project only, KEY being the project
+upper-cased with every character outside A-Z 0-9 turned into _ (project_b ->
+PROJECT_B). E.g. PRODUCT_FRAGS_PROJECT_B=pc=UserAction,bc=bclog. Two projects
+of one KEY stop the run; a KEY of EXCLUDE or EXCLUDE_... has no ENVS_<KEY>
+(that name is ENVS_EXCLUDE's). They need no YAML mapping: ADO gives scripts
+every non-secret variable, variable-group ones included, as an environment
+variable. A dry run prints the usernames each project's regex reads (only
+their count when STORE_USERNAMES is false).
 """
 
 import os
@@ -47,7 +70,8 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
 from gwcommon import (env, env_bool, harden_stdio, explain_import_error, parse_server,
                       explain_connect_error, loki_ssl_context, is_cert_error, LOKI_CERT_HINT,
-                      connect_sql, apply_session_options, tds_probe, param)
+                      connect_sql, apply_session_options, tds_probe, param, split_list,
+                      project_scope, key_clashes, looks_wrong_field, shown_user, field_example)
 
 harden_stdio()
 
@@ -70,12 +94,6 @@ def get_sql():
 # --------------------------------------------------------------------------
 # config
 # --------------------------------------------------------------------------
-
-
-def split_list(value):
-    return [x.strip() for x in (value or "").split(",") if x.strip()]
-
-
 def warn(msg):
     print("##vso[task.logissue type=warning]" + msg)
 
@@ -96,11 +114,9 @@ BYPASS_PROXY = env_bool("BYPASS_PROXY", True)
 LOG_LIMIT = int(env("LOKI_LOG_LIMIT", "5000"))
 HTTP_TIMEOUT = int(env("LOKI_HTTP_TIMEOUT", "180"))
 
-ENVS = split_list(env("ENVS", "DEV1"))
-# ALL = ask Loki, per project. An explicit list applies to every project.
-DISCOVER_ENVS = len(ENVS) == 1 and ENVS[0].upper() == "ALL"
-ENVS_EXCLUDE = [e.upper() for e in split_list(env("ENVS_EXCLUDE"))]
-PRODUCTS = [p.lower() for p in split_list(env("PRODUCTS", "pc"))]
+# ENVS, ENVS_EXCLUDE, PRODUCTS, PRODUCT_JOBS, PRODUCT_FRAGS and
+# LOGIN_USER_REGEX are resolved per project -- gwcommon.project_scope() -- and
+# main() resolves every project's before anything is collected.
 
 LOOKBACK_DAYS = int(env("LOOKBACK_DAYS", "7"))
 RETENTION_DAYS = int(env("LOKI_RETENTION_DAYS", "30"))
@@ -111,15 +127,6 @@ DRY_RUN = env_bool("DRY_RUN", False)
 ALLOW_ZERO_OVERWRITE = env_bool("ALLOW_ZERO_OVERWRITE", False)
 STORE_USERNAMES = env_bool("STORE_USERNAMES", True)
 BUILD_ID = env("BUILD_ID")[:64] or None
-
-USER_REGEX = env("LOGIN_USER_REGEX",
-                 r"(?i)User\s+Login\s*[:=\-]?\s*(?P<user>[A-Za-z0-9._\\@-]+)")
-# LOGIN_USER_REGEX uses .NET-style (?<user>...); accept it by rewriting to Python's.
-USER_REGEX = USER_REGEX.replace("(?<user>", "(?P<user>")
-try:
-    USER_RE = re.compile(USER_REGEX)
-except re.error as ex:
-    raise SystemExit("LOGIN_USER_REGEX is not a valid regex: %s" % ex)
 
 # Usernames the regex could not extract are stored under this sentinel so the
 # per-user rows still sum to the event count. Excluded from distinct_users.
@@ -158,33 +165,6 @@ for _p in PROJECTS:
         raise SystemExit("Project %r is not a valid Loki project label value: use 1-64 of "
                          "A-Z a-z 0-9 . _ -  Check the pipeline's Project parameter and "
                          "LOKI_PROJECTS." % _p)
-
-# pclogs is the common case; BC/CC/CM are guesses. Override from the variable
-# group: PRODUCT_JOBS / PRODUCT_FRAGS as comma lists of comp=value,
-# e.g. PRODUCT_JOBS=cm=ablogs  PRODUCT_FRAGS=cm=ab
-PRODUCT_META = {
-    "pc": {"job": "pclogs", "frag": "pc", "label": "PolicyCenter"},
-    "bc": {"job": "bclogs", "frag": "bc", "label": "BillingCenter"},
-    "cc": {"job": "cclogs", "frag": "cc", "label": "ClaimCenter"},
-    "cm": {"job": "cmlogs", "frag": "cm", "label": "ContactManager"},
-}
-
-
-def apply_overrides(raw, key):
-    for pair in split_list(raw):
-        if "=" in pair:
-            comp, value = pair.split("=", 1)
-            comp = comp.strip().lower()
-            if comp in PRODUCT_META:
-                PRODUCT_META[comp][key] = value.strip()
-
-
-apply_overrides(env("PRODUCT_JOBS"), "job")
-apply_overrides(env("PRODUCT_FRAGS"), "frag")
-
-for p in PRODUCTS:
-    if p not in PRODUCT_META:
-        raise SystemExit("Unknown product '%s' in PRODUCTS. Expected any of: pc, bc, cc, cm." % p)
 
 
 # --------------------------------------------------------------------------
@@ -293,7 +273,21 @@ def selector(project, job, env_label, frag):
         project, job, env_label, frag)
 
 
-def fetch_day_events(project, day_local, env_label, product):
+def line_head(line, width=40):
+    """What of an unparsed line may go into the build log: at most its first
+    `width` characters, and nothing from 'User Login' on -- past it come
+    session ids and csrf tokens. '' if the marker isn't there, or if the
+    head holds key=value or quoted fields: a format that logs those ahead of
+    the message may put a token there too."""
+    cut = line.find("User Login")
+    head = line[:min(cut, width)].rstrip() if cut >= 0 else ""
+    # A leading timestamp is fine to show; what follows it may not be.
+    rest = re.sub(r"^\s*\d+\s+", "", head)
+    rest = re.sub(r"^\d{4}-\d{2}-\d{2}[ T][\d:.,]+", "", rest)
+    return "" if re.search(r'[="{}]|\w+:\S', rest) else head
+
+
+def fetch_day_events(project, scope, day_local, env_label, product):
     """
     Every login event for one project / local calendar day / env / product,
     as a list of (local_datetime, username).
@@ -301,14 +295,16 @@ def fetch_day_events(project, day_local, env_label, product):
     Pages through Loki rather than warning about truncation: this table is
     the only permanent copy, so a silently short day would be wrong forever.
     """
-    meta = PRODUCT_META[product]
+    meta = scope["meta"][product]
+    user_re = scope["user_re"]
     sel = "%s |= `User Login`" % selector(project, meta["job"], env_label, meta["frag"])
 
     start_utc = to_utc(datetime.combine(day_local, datetime.min.time()))
     end_utc = to_utc(datetime.combine(day_local + timedelta(days=1), datetime.min.time()))
 
     events = []
-    unparsed = []
+    unparsed = 0
+    heads = []
     cursor = _unix_ns(start_utc)
     end_ns = _unix_ns(end_utc)
     guard = 0
@@ -332,22 +328,26 @@ def fetch_day_events(project, day_local, env_label, product):
         for ts_ns, line in rows:
             when_utc = datetime.fromtimestamp(ts_ns / 1e9, timezone.utc).replace(tzinfo=None)
             when = from_utc(when_utc) if REPORT_TZ else when_utc
-            m = USER_RE.search(line)
-            user = m.group("user") if (m and m.groupdict().get("user")) else ""
+            m = user_re.search(line)
+            user = (m.group("user") or "") if m else ""
             if not user:
                 user = UNKNOWN_USER
-                if len(unparsed) < 3:
-                    unparsed.append(line)
+                unparsed += 1
+                head = line_head(line)
+                if head and len(heads) < 3:
+                    heads.append(head)
             events.append((when, user))
         if len(rows) < LOG_LIMIT:
             break
         cursor = rows[-1][0] + 1          # resume just past the last entry
 
     if unparsed:
-        warn("%s %s %s/%s : some lines did not match LOGIN_USER_REGEX -- stored as %s." % (
-            project, day_local, env_label, product, UNKNOWN_USER))
-        for smp in unparsed:
-            log("    " + smp)
+        warn("%s %s %s/%s : some lines did not match %s -- %d of %d stored as %s." % (
+            project, day_local, env_label, product, scope["user_re_source"], unparsed,
+            len(events), UNKNOWN_USER))
+        # Never the whole line: it carries session ids and csrf tokens.
+        for head in heads:
+            log("    line starts: %s ..." % head)
 
     return events
 
@@ -390,7 +390,7 @@ def check_projects(projects):
     return list(dict.fromkeys(checked))
 
 
-def discover_envs(project):
+def discover_envs(project, scope):
     """ENVS=ALL -- ask Loki which env labels exist in this project.
 
     The 'query' selector scopes the answer to the project. Without it Loki
@@ -409,21 +409,22 @@ def discover_envs(project):
         found = {v for v in (r.get("data") or []) if v}
     except Exception as ex:
         raise RuntimeError("Could not discover environments of project '%s' from Loki: %s -- "
-                           "set ENVS to an explicit list instead of ALL." % (project, ex))
+                           "set %s to an explicit list instead of ALL."
+                           % (project, ex, scope["sources"]["ENVS"]))
     if not found:
-        raise RuntimeError("ENVS=ALL found no 'env' label values for project '%s'. Check "
-                           "LOKI_PROJECTS / job." % project)
+        raise RuntimeError("%s=ALL found no 'env' label values for project '%s'. Check "
+                           "LOKI_PROJECTS / job." % (scope["sources"]["ENVS"], project))
 
     def natural_key(name):
         prefix = re.sub(r"\d", "", name)
         digits = re.sub(r"\D", "", name)
         return (prefix, int(digits) if digits else 0)
 
-    keep = sorted((e for e in found if e.upper() not in ENVS_EXCLUDE), key=natural_key)
+    keep = sorted((e for e in found if e.upper() not in scope["exclude"]), key=natural_key)
     log("Discovered envs  : %d found in %s, %d after exclusions" % (len(found), project, len(keep)))
     if not keep:
-        raise RuntimeError("Every env of project '%s' is in ENVS_EXCLUDE -- nothing to collect."
-                           % project)
+        raise RuntimeError("Every env of project '%s' is in %s -- nothing to collect."
+                           % (project, scope["sources"]["ENVS_EXCLUDE"]))
     return keep
 
 
@@ -571,7 +572,7 @@ WHERE run_id = %s
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
-def collect_project(cn, project, days):
+def collect_project(cn, project, scope, days):
     """Every day x env x product of one project, under that project's own run
     row. Returns (rows_written, query_errors). Loki failures -- env discovery
     included -- are counted, not raised, so the next project still runs."""
@@ -580,15 +581,21 @@ def collect_project(cn, project, days):
     errors = 0
     failed = []
     totals = {}
+    users_seen = {}       # every username read, in order: what the regex is doing
+    unparsed = 0
+    events_seen = 0
 
     try:
-        envs = discover_envs(project) if DISCOVER_ENVS else ENVS
+        envs = discover_envs(project, scope) if scope["discover"] else scope["envs"]
     except RuntimeError as ex:
         envs = []
         errors += 1
         failed.append(str(ex))
         warn("  ERROR %s" % ex)
-    log("--- project %s : %d env(s)" % (project, len(envs)))
+    log("--- project %s : %d env(s); centres %s; overrides: %s" % (
+        project, len(envs), ", ".join(scope["products"]), ", ".join(scope["overrides"]) or "none"))
+    for msg in scope["ignored"]:
+        warn("%s: %s" % (project, msg))
     if envs:
         log("Environments     : %s" % ", ".join(envs))
 
@@ -604,9 +611,9 @@ def collect_project(cn, project, days):
 
     for day in days:
         for env_label in envs:
-            for product in PRODUCTS:
+            for product in scope["products"]:
                 try:
-                    events = fetch_day_events(project, day, env_label, product)
+                    events = fetch_day_events(project, scope, day, env_label, product)
                 except Exception as ex:
                     errors += 1
                     failed.append("%s %s/%s" % (day, env_label, product))
@@ -617,6 +624,11 @@ def collect_project(cn, project, days):
                 per_user = {}
                 for _when, user in events:
                     per_user[user] = per_user.get(user, 0) + 1
+                    if user == UNKNOWN_USER:
+                        unparsed += 1
+                    else:
+                        users_seen.setdefault(user, None)
+                events_seen += len(events)
                 logins = len(events)
                 distinct = len([u for u in per_user if u != UNKNOWN_USER])
                 totals[env_label] = totals.get(env_label, 0) + logins
@@ -653,6 +665,26 @@ def collect_project(cn, project, days):
     for env_label in envs:
         log("  %-8s %10d logins across %d day(s)" % (
             env_label, totals.get(env_label, 0), len(days)))
+    users = list(users_seen)
+    wrong = [u for u in users if looks_wrong_field(u)]
+    if DRY_RUN:
+        # Enough to see whether the regex reads usernames before a backfill
+        # stores 30 days of whatever it reads -- capped, and never a value
+        # that holds more than a name. None at all if they aren't to be kept.
+        if STORE_USERNAMES:
+            log("  usernames seen (first 5): %s" % (
+                ", ".join(shown_user(u) for u in users[:5]) or "(none)"))
+        else:
+            log("  usernames seen   : %d distinct, %d like the wrong field (not shown: "
+                "STORE_USERNAMES is false)" % (len(users), len(wrong)))
+        log("  %s lines       : %d of %d" % (UNKNOWN_USER, unparsed, events_seen))
+    if wrong:
+        eg = field_example(wrong[0]) if STORE_USERNAMES else ""
+        warn("%s: %d username(s) look like thread names, timestamps or numbers (or more than a "
+             "name)%s -- %s reads the wrong field of this project's lines. Set LOGIN_USER_REGEX_%s "
+             "to a pattern that reads them (DEPLOY.md, 'Projects whose logs differ'), then "
+             "backfill this project." % (project, len(wrong), ", e.g. %s" % eg if eg else "",
+                                         scope["user_re_source"], scope["key"]))
     log("project=%s  status=%s  rows_written=%d  query_errors=%d" % (
         project, status, written, errors))
     log("")
@@ -662,9 +694,6 @@ def collect_project(cn, project, days):
 def main():
     global PROJECTS
 
-    if not DISCOVER_ENVS and not ENVS:
-        raise SystemExit("ENVS is empty -- nothing to collect.")
-
     days = target_days()
     if not days:
         log("Nothing to collect (every requested day is outside Loki retention).")
@@ -672,10 +701,31 @@ def main():
 
     mode = "backfill" if BACKFILL_START else "daily"
     PROJECTS = check_projects(PROJECTS)
+    # Projects sharing a KEY would each take the other's <NAME>_<KEY> settings.
+    clashes = key_clashes(PROJECTS)
+    if clashes:
+        raise SystemExit("Nothing collected -- %s. A <NAME>_<KEY> setting would apply to each of "
+                         "them, so none can have its own; collect only one of them (LOKI_PROJECTS, "
+                         "or the Project parameter)." % "; ".join(
+                             "projects %s share the settings suffix %s"
+                             % (" and ".join("'%s'" % p for p in ps), k) for k, ps in clashes))
+
+    # Every project's settings, resolved and checked before SQL is touched or
+    # anything collected: a bad one would otherwise stop the run after the
+    # projects ahead of it were written.
+    scopes, problems = {}, []
+    for project in PROJECTS:
+        try:
+            scopes[project] = project_scope(project)
+        except ValueError as ex:
+            problems.append(str(ex))
+    if problems:
+        raise SystemExit("Nothing collected -- fix the variable group first:\n  "
+                         + "\n  ".join(problems))
+
     log("Mode             : %s" % mode)
     log("Days             : %s to %s  (%d)" % (days[0], days[-1], len(days)))
     log("Projects         : %s" % ", ".join(PROJECTS))
-    log("Centres          : %s" % ", ".join(PRODUCTS))
     log("Day boundaries   : %s (%s)" % (TZ_LABEL, tz_rule()))
     log("Loki             : %s  (proxy %s)" % (
         LOKI_URL, "bypassed" if BYPASS_PROXY else "system"))
@@ -695,7 +745,7 @@ def main():
     written = 0
     errors = 0
     for project in PROJECTS:
-        w, e = collect_project(cn, project, days)
+        w, e = collect_project(cn, project, scopes[project], days)
         written += w
         errors += e
 

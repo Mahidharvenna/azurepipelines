@@ -129,7 +129,7 @@ steps:
   workingDirectory: '$(Build.SourcesDirectory)'
   timeoutInMinutes: 15
   env:
-    # Only needed when the agent can't reach PyPI (DEPLOY.md 0.4). Mapped
+    # Only needed when the agent can't reach PyPI (DEPLOY.md 0.3). Mapped
     # explicitly so a feed URL holding a credential can be a secret variable --
     # ADO never exposes a secret to a script unless it is mapped. Undefined ones
     # arrive as the literal $(NAME), which the script discards.
@@ -162,6 +162,12 @@ steps:
     DB_TRUSTED_CONNECTION: $(DB_TRUSTED_CONNECTION)
     DB_ENCRYPT:            $(DB_ENCRYPT)
     # --- scope ---
+    # Each of ENVS, ENVS_EXCLUDE, PRODUCTS, PRODUCT_JOBS, PRODUCT_FRAGS and
+    # LOGIN_USER_REGEX can also be set for one project as <NAME>_<PROJECT KEY>
+    # (DEPLOY.md, 'Projects whose logs differ'). Those are deliberately not
+    # mapped here: ADO passes every non-secret variable to the script as an
+    # environment variable anyway, and mapping them would put project names
+    # in the repo.
     ENVS:             $(ENVS)
     ENVS_EXCLUDE:     $(ENVS_EXCLUDE)
     PRODUCTS:         $(PRODUCTS)

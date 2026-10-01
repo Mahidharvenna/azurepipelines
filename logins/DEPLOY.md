@@ -25,6 +25,7 @@ file it needs is committed.
 | 6 | Staleness alert | you |
 | 7 | Next-morning check | you |
 | — | Adding projects to a live deployment | you, once |
+| — | Projects whose logs differ | you, per project |
 
 ---
 
@@ -154,6 +155,9 @@ as-is. What the collector reads from it:
 | `LOGIN_USER_REGEX` | how usernames are read |
 | `REPORT_TIMEZONE`, `REPORT_TZ_LABEL` | day boundaries |
 
+The stream and username settings are shared by every project, but each can
+also be set for one project — see *Projects whose logs differ*.
+
 > **`LOKI_PROJECT` especially.** The collector falls back to it while
 > `LOKI_PROJECTS` is unset. If both are missing the code falls back to the
 > placeholder `myproject`, Loki matches nothing, and every count is a
@@ -173,7 +177,7 @@ Add one only to override it:
 | `LOOKBACK_DAYS` | `7` | Longer self-healing window. |
 | `LOKI_RETENTION_DAYS` | `30` | Your Loki keeps more or less. |
 | `LOKI_LOG_LIMIT` | `5000` | Rarely; paging makes it a performance knob, not a correctness one. |
-| `STORE_USERNAMES` | `true` | You decide not to keep user identifiers. |
+| `STORE_USERNAMES` | `true` | You decide not to keep user identifiers. A dry run and `check` then print how many usernames were read, never the names. |
 
 Any other secrets in the group (e.g. old SMTP settings) are never mapped into
 either job's `env:` block, and ADO does not expose an unmapped secret to a
@@ -203,6 +207,11 @@ would stop the collector:
 - TCP to SQL Server and to Loki; Loki's labels and TLS trust
 - the projects the collector covers (`LOKI_PROJECTS`), each checked against
   the `project` values Loki actually has
+- for each of those projects: the settings it uses (and which are its own),
+  its envs — and whether Loki has an explicitly listed one — its `job` and
+  file names in Loki, whether each centre's selector finds the streams its
+  logins are in, and the usernames its regex reads from up to 5 recent
+  logins — only the usernames, capped, never the log lines
 - that SQL Server answers its handshake — `pymssql` would otherwise hang
   forever on a firewall that accepts connections and then goes silent
 - SQL Server is Microsoft SQL Server, 2016 SP1 or later
@@ -330,15 +339,25 @@ run `all`.
 **Run → tick `Dry run` → Run.**
 
 The header prints `Projects : …`; each project then gets a
-`--- project … : N env(s)` line and its own counts.
+`--- project … : N env(s); centres …; overrides: …` line, its own counts, and
+— in a dry run — `usernames seen (first 5): …` and its count of `(unparsed)`
+lines.
 
 - Non-zero logins **and** non-zero distinct users → selector and regex both good.
-- Logins but zero distinct users → `LOGIN_USER_REGEX` doesn't match. The log
-  prints sample unmatched lines; fix it before storing anything, or you'll
-  backfill 30 days of `(unparsed)`.
+- Logins but zero distinct users → the regex doesn't match. The warning names
+  the variable in use and shows the first 40 characters of unmatched lines,
+  never from `User Login` on, where session ids and tokens follow — and
+  nothing when that part holds key=value, key:value or quoted fields. Fix it
+  before storing anything, or you'll backfill 30 days of `(unparsed)`.
+- `usernames seen` shows thread names (`https-jsse-nio-8443-exec-9`),
+  timestamps or numbers, or `(not a username)` → the regex reads the wrong
+  field of that project's lines. *Projects whose logs differ*. With
+  `STORE_USERNAMES=false` only counts are printed, and the warning still
+  says whether any looked like the wrong field.
 - All zeros → wrong `ENVS` casing, `LOKI_PROJECTS` / `LOKI_PROJECT` value, or
   `job` label. Zeros — or `found no 'env' label values` — for one project
-  only → that project's value.
+  only → that project's value, or its jobs and files: *Projects whose logs
+  differ*.
 
 The header also prints `Day boundaries : … (<rule>)` — the timezone days are
 bucketed in (`REPORT_TIMEZONE`; UTC when unset).
@@ -482,15 +501,22 @@ rebuild, so they are kept and tagged with that one project.
    that isn't one of them.
 
    `ENVS` applies to every project: `ALL` asks Loki for each project's own
-   environments; an explicit list is used as-is for all of them.
+   environments; an explicit list is used as-is for all of them — unless a
+   project has its own `ENVS_<KEY>`.
+
+   `check` also shows, for each project, its jobs and files, whether each
+   centre's selector finds streams, and the usernames its regex reads.
+   Warnings there mean that project logs differently: *Projects whose logs
+   differ*, before step 4.
 
 4. **Backfill each new project — now.** Loki drops a day every day. For each
    new project: **`GW-Login-Collector` → type that project in `Project`,
    `Backfill start` = 30 days ago → Run.** A dry run of it first (phase 4,
-   test 1) is worth the minutes: `LOGIN_USER_REGEX` and `PRODUCT_JOBS` are
-   shared by every project, so one that logs differently shows up as zero
-   distinct users. The project already in the tables needs no backfill.
-   `verify` afterwards: section 0 lists one row per project.
+   test 1) is worth the minutes: the stream and username settings are shared
+   unless a project has its own, so one that logs differently stores zeros,
+   `(unparsed)`, or thread names, timestamps or numbers as usernames. The project already in the
+   tables needs no backfill. `verify` afterwards: section 0 lists one row per
+   project.
 
 5. **Re-import the dashboard** — phase 5, step 2 — and choose **Import
    (Overwrite)**: same uid. It gains a *Project* dropdown, and series and rows
@@ -516,6 +542,97 @@ rebuild, so they are kept and tagged with that one project.
    It removes every environment that never had a login under that project —
    the other projects' included. A real environment that has only been idle
    comes back, with zeros, from the next run.
+
+---
+
+## Projects whose logs differ
+
+Projects in one Loki don't all log alike. One writes `User Login: jsmith`;
+another writes
+
+```
+2026-09-30T00:15:38,051 https-jsse-nio-8443-exec-9  INFO User Login {user="jdoe", userId="1001", csrfToken="…", from="10.0.0.1", session="…"}
+```
+
+and keeps its PolicyCenter logins in `UserAction.log` rather than a file
+ending in `pc.log`. A `LOGIN_USER_REGEX` written for the first, taking the
+second field, stores the second's thread name — `https-jsse-nio-8443-exec-9` —
+as the username; and the default file fragments (`pc`, `bc`, …) find other
+files of the second project, or none.
+
+**Any project can have its own value of a scope setting:** `<NAME>_<KEY>`
+replaces `<NAME>` for that project only. `KEY` is the Loki `project` value
+upper-cased, with every character outside `A-Z 0-9` turned into `_`:
+`project_b` → `PROJECT_B`, `team.b-2` → `TEAM_B_2`.
+
+| Shared | For one project |
+|---|---|
+| `LOGIN_USER_REGEX` | `LOGIN_USER_REGEX_<KEY>` |
+| `PRODUCTS` | `PRODUCTS_<KEY>` |
+| `PRODUCT_JOBS` | `PRODUCT_JOBS_<KEY>` |
+| `PRODUCT_FRAGS` | `PRODUCT_FRAGS_<KEY>` |
+| `ENVS` | `ENVS_<KEY>` |
+| `ENVS_EXCLUDE` | `ENVS_EXCLUDE_<KEY>` (applies with `ALL`) |
+
+Add them to `gw-reports-secrets` as ordinary, non-secret variables. Neither
+YAML maps them, and neither needs to: ADO hands every non-secret variable of a
+linked group to scripts as an environment variable of the same name,
+upper-cased. That keeps project names out of the repo.
+
+A project's own value **replaces** the shared one; it isn't merged with it.
+For `PRODUCT_JOBS_<KEY>` / `PRODUCT_FRAGS_<KEY>`, list every centre whose job
+or fragment differs from the built-in default (`pclogs` / `pc`, `bclogs` /
+`bc`, …) — the shared list no longer applies to that project. Unset, a
+project uses the shared value, and without one the built-in default. An
+exclusion only applies when the project's envs are `ALL`; beside
+an explicit list, `ENVS_EXCLUDE_<KEY>` is ignored, with a warning saying so.
+
+Two projects whose `KEY`s come out the same (`team.b` and `team-b`, or
+`Proj` and `proj`) would each take the other's settings, so the collector
+stops and `check` fails, naming both. And a project whose `KEY` is `EXCLUDE`
+or starts with `EXCLUDE_` can't have its own `ENVS`: `ENVS_EXCLUDE…` is the
+exclusion setting, so it is never read as that project's `ENVS` — the shared
+`ENVS` applies.
+
+For the project above, as `project_b`:
+
+| Variable | Value |
+|---|---|
+| `LOGIN_USER_REGEX_PROJECT_B` | `user="(?<user>[^"]+)"` |
+| `PRODUCT_FRAGS_PROJECT_B` | `pc=UserAction,bc=bclog,cc=cclog,cm=ablog` |
+
+A centre whose files sit under another job also needs
+`PRODUCT_JOBS_PROJECT_B`, e.g. `cm=<that job>`. The built-in username regex —
+used when `LOGIN_USER_REGEX` isn't set at all — reads both formats above.
+
+A value the collector can't use — a regex that doesn't compile or has no
+`(?<user>…)` group, an unknown centre, an `ENVS` or `PRODUCTS` that lists
+nothing (e.g. only commas) — stops the collector before it touches the
+database, naming the project and every variable at fault. A blank
+`<NAME>_<KEY>` counts as unset: the project falls back to the shared value.
+
+**Check, then backfill:**
+
+1. **`GW-Login-Setup` → `check`.** It covers the projects in
+   `LOKI_PROJECTS` only; for one not listed there yet, go straight to the dry
+   run (step 2). For each project it prints the settings in effect and which
+   are its own, its envs, its `job` and file names in Loki, the streams each
+   centre's selector finds, and the usernames its regex reads from up to 5
+   recent logins — of the files the collector reads, else of the job's,
+   saying so — the usernames only, capped, never the lines. An env Loki doesn't have, a selector that finds nothing
+   or only files without the logins, or usernames that come out as thread
+   names, timestamps, numbers, `(not a username)` or `(no match)`, is a
+   warning naming the variable to set and, where it can tell, a value for it.
+2. **Dry run of that project:** `GW-Login-Collector` → `Project` = the
+   project, `Dry run` ticked. Its header lists the overrides in effect —
+   `--- project project_b : 3 env(s); centres pc, bc; overrides:
+   LOGIN_USER_REGEX_PROJECT_B, PRODUCT_FRAGS_PROJECT_B` — and it ends with
+   `usernames seen (first 5): …` and its count of `(unparsed)` lines.
+3. **Backfill it** once those look right: `Project` = the project, `Backfill
+   start` = 30 days ago. Every re-collected day that has logins gets its
+   counts and per-user rows replaced, so the project's usernames and distinct
+   users are rewritten from Loki. Days older than Loki's retention stay as
+   they were — Loki no longer has them.
 
 ---
 
@@ -550,6 +667,12 @@ rebuild, so they are kept and tagged with that one project.
 | `LOKI_PROJECTS names '…', but Loki has no such project` | a typo, or not the value Loki uses | fix `LOKI_PROJECTS` — the message lists the values Loki has |
 | Every Grafana panel: `Incorrect syntax near ')'`, and a ⚠ on the *Project* / *Environment* / *Product* dropdowns | the dropdowns came back empty, so panels render `project IN ()`. The datasource can't read the tables — another server, no `SELECT`, or the dashboard's `db` variable isn't `DBNAME` — or they're still empty | hover the ⚠ on *Project* for the real error; phase 5 |
 | Every count is 0 | `LOKI_PROJECTS` / `LOKI_PROJECT` / `ENVS` / `job` wrong | phase 4, test 1 |
+| Usernames look like thread names (`https-jsse-nio-…-exec-N`), timestamps or numbers — in the dashboard, a dry run or `check` — or show as `(not a username)` in a dry run or `check` (in the dashboard such a value appears as a long raw string) | that project's lines have something else where the regex expects the user, or the regex reads on past it | that project's `LOGIN_USER_REGEX_<KEY>`, then backfill it — *Projects whose logs differ*. The backfill replaces those rows only for days Loki still has |
+| `check`: `no streams in the last 7 days for {project=…}`, or `… hold none of the job's 'User Login' lines` | that centre's job or file fragment doesn't fit that project | set the variable the warning suggests — *Projects whose logs differ* |
+| `check`: `… lists …, but Loki has no such env for …` | an explicit `ENVS` / `ENVS_<KEY>` names an env that project doesn't have (or in another case) | fix the variable the warning names; the collector would store zeros for it every day |
+| `<NAME>_<KEY>` is set, but `overrides:` shows none, or omits it | it is marked secret (not exposed to scripts automatically), or its name doesn't follow the `KEY` rule (e.g. `-` instead of `_`); or it is `ENVS_EXCLUDE_<KEY>` beside an explicit `ENVS` list (see the *… ignored: … is an explicit list* warning), or `ENVS_<KEY>` for a `KEY` that is `EXCLUDE` or starts with `EXCLUDE_` | make it a plain variable named exactly `<NAME>_<KEY>` |
+| `share the settings suffix` | two projects' `KEY`s are the same | collect only one of them — *Projects whose logs differ* |
+| `… is not a valid regex` / `has no group named 'user'` / `unknown product` | a scope setting the collector can't use; it stopped before writing anything | fix the variable the message names |
 
 ---
 

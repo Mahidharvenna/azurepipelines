@@ -44,7 +44,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gwcommon import (env, env_bool, harden_stdio, explain_import_error, parse_server,
                       explain_connect_error, loki_ssl_context, is_cert_error, LOKI_CERT_HINT,
                       one_line, connect_sql, apply_session_options, tds_probe,
-                      is_login_failure, sql_error_text, param)
+                      is_login_failure, sql_error_text, param, split_list, scoped,
+                      project_scope, key_clashes, looks_wrong_field, shown_user, field_example,
+                      DEFAULT_PRODUCT_META)
 
 harden_stdio()
 
@@ -79,6 +81,9 @@ LOKI_PROJECTS = ([p.strip() for p in env("LOKI_PROJECTS").split(",") if p.strip(
 # The collector's rule for a project value: it goes inside a LogQL selector's
 # double quotes and into a VARCHAR(64) column.
 PROJECT_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+# Read as the collector reads it: usernames that aren't to be kept aren't
+# shown here either.
+STORE_USERNAMES = env_bool("STORE_USERNAMES", True)
 
 
 def existing_project():
@@ -455,7 +460,8 @@ def check_loki_projects(opener):
     """LOKI_PROJECTS against the project values Loki actually has -- a typo
     there leaves that project with no data, or with zeros, and nothing else
     says why. Over the last 30 days, as the collector's env discovery asks:
-    Loki's default is 6 hours, and a quiet project would look missing."""
+    Loki's default is 6 hours, and a quiet project would look missing.
+    Returns Loki's values, or None if it couldn't say."""
     end = int(time.time()) * 10 ** 9
     qs = urllib.parse.urlencode({"start": end - 30 * 86400 * 10 ** 9, "end": end})
     try:
@@ -464,12 +470,346 @@ def check_loki_projects(opener):
             known = json.loads(r.read().decode("utf-8")).get("data") or []
     except Exception as ex:
         soft("Could not list Loki's project values (%s) -- LOKI_PROJECTS not checked." % ex)
-        return
+        return None
     ok("Loki projects: %s" % (", ".join(known) or "(none)"))
     for p in LOKI_PROJECTS:
         if PROJECT_RE.match(p) and p not in known:
             blocker("collector", "LOKI_PROJECTS names '%s', but Loki has no such project. "
                                  "Loki has: %s" % (p, ", ".join(known) or "(none)"))
+    return known
+
+
+# ---------------------------------------------------------------------------
+# per-project scope, asked of Loki
+# ---------------------------------------------------------------------------
+NS_PER_DAY = 86400 * 10 ** 9
+# A file name that can stand as a PRODUCT_FRAGS value as it is: it lands in a
+# regex inside a LogQL string.
+FRAG_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+NO_MATCH = "(no match)"
+
+
+def var_name(source):
+    return source if env(source) else source + " (built-in default)"
+
+
+def regex_name(scope):
+    return var_name(scope["user_re_source"])
+
+
+def envs_text(scope):
+    """A project's envs as the collector takes them."""
+    if scope["discover"]:
+        return "ALL" + (" except %s" % ", ".join(scope["exclude"]) if scope["exclude"] else "")
+    return ", ".join(scope["envs"])
+
+
+def loki_json(opener, path, params):
+    with opener.open(LOKI_URL + path + "?" + urllib.parse.urlencode(params),
+                     timeout=30) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def last_days(days):
+    end = int(time.time()) * 10 ** 9
+    return {"start": end - days * NS_PER_DAY, "end": end}
+
+
+def basename(path):
+    return re.split(r"[\\/]", path or "")[-1]
+
+
+def dot_log(names):
+    """Only names the collector's filename=~".*<frag>.log" can match."""
+    return [n for n in names if n.endswith(".log")]
+
+
+def fits(frag, path):
+    """Whether the collector's filename=~".*<frag>.log" takes this file. Loki
+    anchors =~ at both ends."""
+    try:
+        return bool(re.fullmatch(".*%s.log" % frag, path or ""))
+    except re.error:
+        return False
+
+
+def label_values(opener, label, sel):
+    """Sorted values of one label within a selector over the last 30 days --
+    the collector's window. None, after a warning, if Loki won't say."""
+    params = dict(last_days(30), query=sel)
+    try:
+        data = loki_json(opener, "/loki/api/v1/label/%s/values" % label, params).get("data")
+    except Exception as ex:
+        soft("Could not list Loki's '%s' values for %s (%s) -- not checked." % (label, sel, ex))
+        return None
+    return sorted(set(v for v in data or [] if v))
+
+
+_UNSCOPED = {}          # asked once a run: it is how this Loki behaves
+
+
+def listing_unscoped(opener, project, known):
+    """Whether Loki ignores 'query' on its label listings -- older versions do
+    (collect_logins' discover_envs says the same). Asked unambiguously: the
+    'project' label listed within one project's selector is just that project
+    when 'query' is honoured, and every project when it isn't. Comparing jobs
+    or files can't tell: two projects may well share both. Only askable with
+    two or more projects in Loki; if Loki won't answer, assumed honoured."""
+    if len(known or []) < 2:
+        return False
+    if "v" not in _UNSCOPED:
+        try:
+            data = loki_json(opener, "/loki/api/v1/label/project/values",
+                             dict(last_days(30), query='{project="%s"}' % project)).get("data")
+            _UNSCOPED["v"] = len(set(v for v in data or [] if v)) > 1
+        except Exception:
+            _UNSCOPED["v"] = False
+    return _UNSCOPED["v"]
+
+
+def series_count(opener, sel):
+    """(streams, window) for a selector: the last 24 h, else the last 7 days,
+    so a quiet day doesn't look like a wrong selector. None, after a warning,
+    if Loki won't say."""
+    try:
+        for days, span in ((1, "24 h"), (7, "7 days")):
+            params = last_days(days)
+            params["match[]"] = sel
+            n = len(loki_json(opener, "/loki/api/v1/series", params).get("data") or [])
+            if n:
+                return n, span
+        return 0, "7 days"
+    except Exception as ex:
+        soft("Could not count Loki's streams for %s (%s) -- not checked." % (sel, ex))
+        return None
+
+
+def login_selector(project, job, frag=None):
+    """'User Login' lines of a job -- with a frag, only those of the files the
+    collector reads for that centre, by its own filename matcher."""
+    if frag is None:
+        return '{project="%s", job="%s"} |= "User Login"' % (project, job)
+    return '{project="%s", job="%s", filename=~".*%s.log"} |= "User Login"' % (project, job, frag)
+
+
+def recent_logins(opener, sel):
+    """Up to 5 recent 'User Login' lines of a selector, newest first, as
+    (file, line): the last 24 h, else the last 7 days. The lines are only
+    parsed, never printed -- they carry session ids and csrf tokens. None,
+    after a warning, if Loki won't say."""
+    try:
+        for days in (1, 7):
+            params = dict(last_days(days), query=sel, limit=5, direction="backward")
+            data = loki_json(opener, "/loki/api/v1/query_range", params).get("data") or {}
+            rows = []
+            for stream in data.get("result") or []:
+                path = (stream.get("stream") or {}).get("filename") or ""
+                for ts, line in stream.get("values") or []:
+                    rows.append((int(ts), path, line))
+            if rows:
+                rows.sort(key=lambda r: r[0], reverse=True)
+                return [(path, line) for _ts, path, line in rows[:5]]
+        return []
+    except Exception as ex:
+        soft("Could not read recent 'User Login' lines for %s (%s) -- not checked." % (sel, ex))
+        return None
+
+
+def files_of(lines):
+    """The files a set of (file, line) came from, in order, once each."""
+    return list(dict.fromkeys(path for path, _line in lines or [] if path))
+
+
+def suggested_list(scope, name, fixes):
+    """The whole comp=value list to set as <name>_<KEY>: the pairs in effect
+    for the project now plus the fixes. A project's own value replaces the
+    shared one outright, so a lone fix would drop the shared pairs."""
+    pairs = {}
+    for pair in split_list(scoped(name, scope["project"])):
+        if "=" in pair:
+            comp, value = pair.split("=", 1)
+            if comp.strip().lower() in DEFAULT_PRODUCT_META:
+                pairs[comp.strip().lower()] = value.strip()
+    pairs.update(fixes)
+    return "%s_%s=%s" % (name, scope["key"], ",".join(
+        "%s=%s" % (c, pairs[c]) for c in DEFAULT_PRODUCT_META if c in pairs))
+
+
+def check_project_scope(opener, scope, known):
+    """What the collector will read for one project, asked of Loki: its jobs
+    and files, whether its envs exist, whether each centre's selector finds
+    the streams that hold its logins, and the usernames its regex reads from
+    recent logins. Warnings only -- none of it stops the database setup, and
+    Loki may just be slow."""
+    try:
+        _check_project_scope(opener, scope, known)
+    except Exception as ex:
+        soft("%s: the per-project Loki check stopped: %s" % (scope["project"], ex))
+
+
+def _check_project_scope(opener, scope, known):
+    p = scope["project"]
+    every = '{project="%s"}' % p
+    jobs = label_values(opener, "job", every)
+    files = label_values(opener, "filename", every)
+    # None from here on means "not known": the listing failed, or was every
+    # project's -- nothing may be inferred from it then.
+    unscoped = listing_unscoped(opener, p, known)
+    if unscoped:
+        info("%s: Loki ignores the project in its label listings and lists every project's jobs "
+             "and files, so they aren't shown and no job or file is inferred from them. The "
+             "stream and username checks below still apply." % p)
+        jobs = files = None
+    names = sorted(set(basename(f) for f in files or []))
+    if jobs is not None:
+        info("%s: jobs: %s" % (p, ", ".join(jobs) or "(none)"))
+    if files is not None:
+        info("%s: files: %s%s" % (p, ", ".join(names[:15]) or "(none)",
+                                  " (+%d more)" % (len(names) - 15) if len(names) > 15 else ""))
+
+    # --- are the listed envs in Loki? ---------------------------------------
+    if scope["discover"] and unscoped:
+        # The collector's ALL asks the same listing, so it would take every
+        # project's envs and store a zero row a day for each this one lacks.
+        soft("%s: %s is ALL, but this Loki lists every project's envs for any one project -- "
+             "the collector would store zeros every day for the other projects' envs. Set "
+             "ENVS_%s to this project's own envs."
+             % (p, var_name(scope["sources"]["ENVS"]), scope["key"]))
+    if not scope["discover"]:
+        env_var = var_name(scope["sources"]["ENVS"])
+        if unscoped:
+            info("%s: envs not checked against Loki -- its listing isn't per project." % p)
+        else:
+            have = label_values(opener, "env", every)
+            lacking = [e for e in scope["envs"] if have is not None and e not in have]
+            if lacking:
+                soft("%s: %s lists %s, but Loki has no such env for %s in the last 30 days (it "
+                     "has: %s) -- the collector would store zeros for it every day."
+                     % (p, env_var, ", ".join(lacking), p, ", ".join(have) or "none"))
+
+    logins = {}
+
+    def logins_of(job, frag=None):      # cached: the checks below share them
+        if (job, frag) not in logins:
+            logins[(job, frag)] = recent_logins(opener, login_selector(p, job, frag))
+        return logins[(job, frag)]
+
+    # --- does each centre's selector find the streams with its logins? -----
+    misses = []                  # (product, what is wrong, what Loki has, variable to fix)
+    fixes = {"PRODUCT_JOBS": {}, "PRODUCT_FRAGS": {}}
+    for prod in scope["products"]:
+        job, frag = scope["meta"][prod]["job"], scope["meta"][prod]["frag"]
+        sel = '{project="%s", job="%s", filename=~".*%s.log"}' % (p, job, frag)
+        counted = series_count(opener, sel)
+        if counted is None:
+            continue
+        n, span = counted
+        if n:
+            # Streams aren't logins: a default fragment can match another of
+            # the job's files. The job's recent logins are only a sample, so
+            # the collector's own selector has the last word.
+            login_files = files_of(logins_of(job))
+            if (not login_files or any(fits(frag, f) for f in login_files)
+                    or logins_of(job, frag)):
+                ok("%s %s: %d stream(s) in the last %s -- %s" % (p, prod, n, span, sel))
+                continue
+            what = ("the %d stream(s) in the last %s for %s hold none of the job's 'User Login' "
+                    "lines" % (n, span, sel))
+        else:
+            what = "no streams in the last 7 days for %s" % sel
+        coded = [f for f in names if prod in f.lower()]
+        found = ["files of %s with '%s' in the name: %s" % (p, prod, ", ".join(coded[:15]))
+                 ] if coded else []
+        if not n and jobs is not None and job not in jobs:
+            # Wrong job: which of its files hold this centre can't be asked yet.
+            cands = [j for j in jobs if prod in j.lower()]
+            fixes["PRODUCT_JOBS"][prod] = cands[0] if len(cands) == 1 else "<job>"
+            found.insert(0, "%s has no job '%s' (its jobs: %s)"
+                         % (p, job, ", ".join(jobs) or "none"))
+            misses.append((prod, what, found, "PRODUCT_JOBS"))
+            continue
+        job_logins = logins_of(job)
+        login_files = files_of(job_logins)
+        job_files = None if unscoped else label_values(
+            opener, "filename", '{project="%s", job="%s"}' % (p, job))
+        job_names = sorted(set(basename(f) for f in job_files or []))
+        if not n and jobs is None and not job_files and job_logins == []:
+            # No listing to say whether the job exists, and nothing under it:
+            # the job is the suspect, not the file.
+            fixes["PRODUCT_JOBS"][prod] = "<job>"
+            found.insert(0, "job %s: files %s, no 'User Login' lines in 7 days"
+                         % (job, "unknown" if job_files is None else "none"))
+            misses.append((prod, what, found, "PRODUCT_JOBS"))
+            continue
+        found.insert(0, "job %s has files: %s" % (job, "unknown" if job_files is None
+                                                   else ", ".join(job_names[:15]) or "none"))
+        login_names = list(dict.fromkeys(basename(f) for f in login_files))
+        if login_names:
+            found.insert(1, "its 'User Login' lines are in: %s" % ", ".join(login_names))
+        # The file the logins are in beats a name that merely looks right.
+        pick = (dot_log(login_names) or dot_log([f for f in job_names if prod in f.lower()])
+                or (dot_log(job_names) if len(job_names) == 1 else []))
+        stem = pick[0][:-4] if pick else ""
+        fixes["PRODUCT_FRAGS"][prod] = stem if FRAG_RE.match(stem) else "<file name without .log>"
+        misses.append((prod, what, found, "PRODUCT_FRAGS"))
+
+    for prod, what, found, name in misses:
+        soft("%s %s: %s -- the collector would store zeros. In Loki: %s. Set %s."
+             % (p, prod, what, "; ".join(found), suggested_list(scope, name, fixes[name])))
+
+    # --- does the regex read usernames? -------------------------------------
+    # From what the collector itself reads for the first centre; failing that,
+    # from the job's lines, saying they are files it doesn't read.
+    first = scope["products"][0]
+    job, frag = scope["meta"][first]["job"], scope["meta"][first]["frag"]
+    lines, elsewhere = logins_of(job, frag), False
+    if lines == []:
+        lines, elsewhere = logins_of(job), True
+    if lines is None:
+        return
+    if not lines:
+        info("%s: no 'User Login' lines from job %s in 7 days -- usernames not checked."
+             % (p, job))
+        return
+    where = "of job %s, in %s%s" % (
+        job, ", ".join(dict.fromkeys(basename(f) for f in files_of(lines))) or "(no file label)",
+        " -- not a file the collector reads for %s" % first if elsewhere else "")
+    users, seen = [], []         # seen: (value, its line), so a token is known by its key
+    for _path, line in lines:
+        m = scope["user_re"].search(line)
+        u = ((m.group("user") or "") if m else "") or NO_MATCH
+        users.append(u)
+        seen.append((u, line))
+    unmatched = users.count(NO_MATCH)
+    wrong = [(u, line) for u, line in seen if u != NO_MATCH and looks_wrong_field(u, line)]
+    # Only what the regex extracted, capped -- never the lines, nor a value
+    # that holds more than a name; and only counts if usernames aren't kept.
+    if STORE_USERNAMES:
+        info("%s: usernames %s reads from %d recent 'User Login' line(s) %s: %s"
+             % (p, regex_name(scope), len(users), where,
+                ", ".join(u if u == NO_MATCH else shown_user(u, line=line) for u, line in seen)))
+    else:
+        info("%s: %s reads a value from %d of %d recent 'User Login' line(s) %s; %d look like "
+             "the wrong field. Not shown: STORE_USERNAMES is false."
+             % (p, regex_name(scope), len(users) - unmatched, len(users), where, len(wrong)))
+    if unmatched or wrong:
+        own = "LOGIN_USER_REGEX_%s" % scope["key"]
+        what = []
+        if wrong:
+            eg = field_example(wrong[0][0], line=wrong[0][1]) if STORE_USERNAMES else ""
+            what.append("thread names, timestamps or numbers (or more than a name), not "
+                        "usernames%s" % (" (e.g. %s)" % eg if eg else ""))
+        if unmatched:
+            what.append("nothing from %d of %d line(s)" % (unmatched, len(users)))
+        if any('user="' in line for _path, line in lines):
+            pattern = ("to user=\"(?<user>[^\"]+)\" -- these lines look like "
+                       "User Login {user=\"...\", ...}")
+        else:
+            pattern = "to a pattern with a (?<user>...) group around the username"
+        soft("%s: %s reads %s. %s %s %s, then dry-run the collector with Project=%s and check "
+             "'usernames seen'." % (p, regex_name(scope), " and ".join(what),
+                                    "Fix" if scope["user_re_source"] == own else "Set",
+                                    own, pattern, p))
 
 
 def preflight():
@@ -519,6 +859,27 @@ def preflight():
         if not PROJECT_RE.match(p):
             blocker("collector", "LOKI_PROJECTS entry '%s' is not a valid Loki project label "
                                  "value: use 1-64 of A-Z a-z 0-9 . _ -" % p)
+    # Each project's scope settings, resolved exactly as the collector resolves
+    # them -- one it can't use stops the collector before it collects anything.
+    valid = list(dict.fromkeys(p for p in LOKI_PROJECTS if PROJECT_RE.match(p)))
+    for key, same in key_clashes(valid):
+        blocker("collector", "Projects %s share the settings suffix %s: a <NAME>_%s variable would "
+                             "apply to each of them, so none can have its own, and the collector "
+                             "stops on it. Keep only one of them in LOKI_PROJECTS."
+                % (" and ".join("'%s'" % x for x in same), key, key))
+    scopes = []
+    for p in valid:
+        try:
+            scope = project_scope(p)
+        except ValueError as ex:
+            blocker("collector", str(ex))
+            continue
+        scopes.append(scope)
+        info("%s: envs %s; centres %s; usernames by %s; overrides: %s" % (
+            p, envs_text(scope), ", ".join(scope["products"]), regex_name(scope),
+            ", ".join(scope["overrides"]) or "none"))
+        for msg in scope["ignored"]:
+            soft("%s: %s" % (p, msg))
     if not LOKI_URL:
         blocker("collector", "LOKI_URL is not set -- the collector cannot run.")
     else:
@@ -553,7 +914,10 @@ def preflight():
                         blocker("collector", "Loki has no '%s' label -- the collector's selector "
                                              "will match nothing." % needed)
                 if "project" in labels:
-                    check_loki_projects(opener)
+                    known = check_loki_projects(opener)
+                    for scope in scopes:
+                        if known and scope["project"] in known:
+                            check_project_scope(opener, scope, known)
             except Exception as ex:
                 if is_cert_error(ex):
                     blocker("collector", LOKI_CERT_HINT + " (%s)" % ex)

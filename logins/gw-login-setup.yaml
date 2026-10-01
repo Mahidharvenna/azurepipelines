@@ -130,7 +130,7 @@ steps:
   workingDirectory: '$(Build.SourcesDirectory)'
   timeoutInMinutes: 15
   env:
-    # Only needed when the agent can't reach PyPI (DEPLOY.md 0.4). Mapped
+    # Only needed when the agent can't reach PyPI (DEPLOY.md 0.3). Mapped
     # explicitly so a feed URL holding a credential can be a secret variable --
     # ADO never exposes a secret to a script unless it is mapped. Undefined ones
     # arrive as the literal $(NAME), which the script discards.
@@ -162,3 +162,16 @@ steps:
     LOKI_VERIFY_TLS:       $(LOKI_VERIFY_TLS)
     LOKI_CA_BUNDLE:        $(LOKI_CA_BUNDLE)      # optional: internal CA .pem for Loki
     BYPASS_PROXY:          $(BYPASS_PROXY)
+    # 'check' resolves each project's scope as the collector does, so the
+    # shared settings are mapped exactly as the collector maps them -- a secret
+    # one included, which ADO would otherwise hide from this step only. Their
+    # per-project <NAME>_<KEY> forms are deliberately not mapped: ADO passes
+    # every non-secret variable to the script anyway, and mapping them would
+    # put project names in the repo.
+    ENVS:                  $(ENVS)
+    ENVS_EXCLUDE:          $(ENVS_EXCLUDE)
+    PRODUCTS:              $(PRODUCTS)
+    PRODUCT_JOBS:          $(PRODUCT_JOBS)
+    PRODUCT_FRAGS:         $(PRODUCT_FRAGS)
+    LOGIN_USER_REGEX:      $(LOGIN_USER_REGEX)
+    STORE_USERNAMES:       $(STORE_USERNAMES)   # false: 'check' shows no usernames either

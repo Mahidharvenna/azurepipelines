@@ -74,8 +74,9 @@ overwrite each other.
 
 The Loki, scope and timezone settings (`LOKI_URL`, `LOKI_PROJECT`, `ENVS`,
 `PRODUCTS`, `LOGIN_USER_REGEX`, `REPORT_TIMEZONE`, ...) come from the
-`gw-reports-secrets` group (see `DEPLOY.md`); these have working defaults and
-need setting only to override:
+`gw-reports-secrets` group (see `DEPLOY.md`). The six scope settings can also
+be set per project — see *Projects whose logs differ* below. These have
+working defaults and need setting only to override:
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -105,6 +106,40 @@ The dashboard's *Project* dropdown filters every panel.
 Tables made before the `project` column are upgraded in place by setup's
 `schema`, their rows tagged with `LOKI_PROJECT`. [`DEPLOY.md`](DEPLOY.md),
 *Adding projects*, has the order to do it in.
+
+## Projects whose logs differ
+
+One project logs `User Login: jsmith`, another
+`… INFO User Login {user="jdoe", userId="1001", csrfToken="…", from="10.0.0.1", session="…"}`
+and keeps its PolicyCenter logins in `UserAction.log`. A regex written for the
+first stores the second's thread name (`https-jsse-nio-8443-exec-9`) as the
+username, and the default file fragments miss its files.
+
+So each of `LOGIN_USER_REGEX`, `PRODUCTS`, `PRODUCT_JOBS`, `PRODUCT_FRAGS`,
+`ENVS` and `ENVS_EXCLUDE` (applies with `ALL`) can be set for one project:
+`<NAME>_<KEY>` replaces `<NAME>` for that project only — replaces, not
+merges; blank counts as unset. `KEY` is the project
+upper-cased with every character outside `A-Z 0-9` as `_` (`project_b` →
+`PROJECT_B`). For example:
+
+```
+LOGIN_USER_REGEX_PROJECT_B = user="(?<user>[^"]+)"
+PRODUCT_FRAGS_PROJECT_B    = pc=UserAction,bc=bclog,cc=cclog,cm=ablog
+```
+
+They go in `gw-reports-secrets` as non-secret variables and need no YAML
+mapping: ADO gives scripts every non-secret variable as an environment
+variable, so no project name lands in the repo. The built-in regex, used when
+`LOGIN_USER_REGEX` isn't set, reads both formats above.
+
+Setup's `check` shows each `LOKI_PROJECTS` project's envs, jobs, files, and
+the usernames its regex reads from a few recent logins (never the lines), and
+warns with the variable to set. A dry run with *Project* = that project — the
+check for one not in `LOKI_PROJECTS` yet — prints `usernames seen (first 5)`;
+with `STORE_USERNAMES=false`, both print counts only. After fixing a project's regex, backfill that project (30 days): each
+re-collected day's per-user rows are replaced, rewriting its usernames and
+distinct counts. Older days stay as they were. [`DEPLOY.md`](DEPLOY.md) has
+the details.
 
 ## Two safeguards worth knowing about
 
@@ -144,7 +179,7 @@ It takes an `action`:
 
 | Action | Does | Writes? |
 |---|---|---|
-| `check` | Pre-flight: OS, Python, `pymssql`, TCP to Loki and SQL, the SQL Server handshake, Loki labels and TLS, `LOKI_PROJECTS` against Loki's projects, SQL Server 2016 SP1+, rights, the `project` column. Reports **every** problem in one run. | no |
+| `check` | Pre-flight: OS, Python, `pymssql`, TCP to Loki and SQL, the SQL Server handshake, Loki labels and TLS, `LOKI_PROJECTS` against Loki's projects, each project's settings, jobs, files, streams per centre and the usernames its regex reads, SQL Server 2016 SP1+, rights, the `project` column. Reports **every** problem in one run. | no |
 | `schema` | Applies `sql/schema.sql` — adding the `project` column to tables made before it — then confirms all six objects (3 tables, 3 views) exist by name | yes |
 | `grants` | Applies `sql/grants.sql` — requires `grafanaLogin` | yes |
 | `verify` | Runs `sql/verify.sql`, printing every result set | no |
