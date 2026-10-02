@@ -1,0 +1,215 @@
+# =============================================================================
+# Guidewire admin data load: loads ONE admin-data XML file from this repo into
+# ONE environment's Guidewire application (PolicyCenter, BillingCenter,
+# ClaimCenter or ContactManager) through the server's ImportToolsAPI web
+# service -- the SOAP API behind Guidewire's import_tools command. Everything
+# about the call is read from the server's WSDL, so the Guidewire version does
+# not need to be known.
+#
+# Administrative data only (users, groups, roles, activity patterns, authority
+# limits, ...): Guidewire does not support business data through this API and
+# does not fully validate what it imports. A record whose public ID already
+# exists is overwritten field by field -- empty fields become null -- with no
+# prompt. Read admin-data-load/README.md before the first import.
+#
+# Run it in this order, with the same env, product and file each time:
+#   1. check     reaches the server and reads its ImportToolsAPI WSDL; with
+#                credentials set it also logs in through a read-only
+#                SystemToolsAPI.getVersion call. Writes nothing. The
+#                credentials are proven only if that login passes.
+#   2. validate  parses the XML file and prints what is in it; writes nothing
+#   3. import    repeats 1 and 2, then sends the file -- this writes to the
+#                live server. Afterwards run the User Exception and Group
+#                Exception batch processes.
+#
+# Production: an env whose name matches PROD_ENV_PATTERN (default: starts with
+# PROD, PRD or PRODUCTION) is refused unless 'confirm' repeats the env name.
+# That stops accidents only. The README lists the real protection: limit the
+# variables that can be set at queue time, and put an approval and a branch
+# control on the variable group (or an Environment).
+#
+# Register: Pipelines -> New pipeline -> this repo -> Existing Azure Pipelines
+# YAML file -> the branch that holds this folder -> this file. The file to load
+# is read from the branch the run checks out, so set the pipeline's default
+# branch to that branch (Edit -> ... -> Triggers -> YAML -> Get sources), or
+# pick it in the Run dialog every time.
+#
+# Variable group 'gw-admin-data' (Pipelines -> Library; create it once and
+# allow this pipeline under Pipeline permissions). <ENV> and <PRODUCT> are the
+# Run-dialog values upper-cased (env dev_1 + product bc -> DEV_1_BC):
+#   <ENV>              the app's base URL, app path included, e.g.
+#                      DEV_1 = https://gw-dev1-pc.example.internal:9443/pc
+#   <ENV>_<PRODUCT>    optional: this product's URL, used instead of <ENV>;
+#                      needed for each product <ENV> does not point at
+#   username           the Guidewire integration user, and
+#   password           its password -- mark it secret
+#   <ENV>_USERNAME     optional, both or neither: this env's own login, used
+#   <ENV>_PASSWORD     instead of username/password -- mark it secret
+# Optional settings (TLS, timeout, auth style, ...) are listed in
+# admin-data-load/README.md; leave them out to get the defaults. Never add a
+# plain variable named like one of the step's ADL_* keys below.
+# =============================================================================
+
+trigger: none
+pr: none
+
+# Template expressions are expanded when the run is queued, so this reads e.g.
+# GW-AdminData-DEV_1-pc-20261002.1. env is sanitised the same way everywhere
+# it is used: $ becomes _ (no $(variable) can form) and spaces are dropped.
+name: "GW-AdminData-${{ upper(replace(replace(parameters.env, '$', '_'), ' ', '')) }}-${{ parameters.product }}-$(Date:yyyyMMdd).$(Rev:r)"
+
+parameters:
+# Read-only by default: an accidental run changes nothing.
+- name: action
+  displayName: 'Action (check and validate change nothing; import loads the file)'
+  type: string
+  default: check
+  values:
+  - check
+  - validate
+  - import
+
+# A text box, so environment names stay in the variable group, not in the repo.
+# Defaults to 'none', not '': this server's Run dialog marks a text parameter
+# with an empty default as Required. The script refuses 'none'.
+- name: env
+  displayName: 'Environment, e.g. DEV_1 (letters, digits and _ only)'
+  type: string
+  default: none
+
+- name: product
+  displayName: 'Product (cm = ContactManager, served at /ab)'
+  type: string
+  default: pc
+  values:
+  - pc
+  - bc
+  - cc
+  - cm
+
+- name: file
+  displayName: 'Admin-data XML file: path from the repo root, e.g. admin-data/dev_1/roles.xml (validate and import)'
+  type: string
+  default: none
+
+- name: confirm
+  displayName: 'Production env only: type the env name again, in capitals'
+  type: string
+  default: none
+
+# ADO Server 2022 RTW rejects a template expression on pool.name, so this is a
+# literal. Linux: the steps are bash, and need python3 >= 3.9 (standard library
+# only -- nothing is installed). The agent must reach the app servers' HTTPS
+# port.
+pool:
+  name: DevopsAutomation
+  demands:
+  - Agent.OS -equals Linux
+
+variables:
+- group: 'gw-admin-data'
+
+steps:
+# Step env values are macro-expanded, secrets included, before a step runs, so
+# a file path holding $( could pull a secret into the script's arguments and
+# the log. Fail the run first; the condition is evaluated when it is queued.
+- ${{ if contains(parameters.file, '$(') }}:
+  - bash: |
+      echo "##vso[task.logissue type=error]The 'file' parameter contains a variable macro (a dollar sign followed by an opening parenthesis). Give the XML file's path from the repo root."
+      exit 1
+    displayName: 'Refuse file parameter'
+
+- checkout: self
+  clean: true
+
+# Find the tool instead of assuming where this folder sits in the repo: at the
+# root on GitHub, deeper in other copies. Two copies is an error rather than a
+# guess -- one of them is stale. quotepath=off: a non-ASCII folder name would
+# otherwise come back quoted and escaped.
+- bash: |
+    hits=`git -c core.quotepath=off ls-files -- '*admin-data-load/admin_data_load.py'`
+    n=`printf '%s\n' "$hits" | grep -c .`
+    if [ "$n" -eq 0 ]; then
+      echo "##vso[task.logissue type=error]No admin-data-load/admin_data_load.py in this repo on this branch. Commit it -- git only picks up new files when you git add them."
+      exit 1
+    fi
+    if [ "$n" -gt 1 ]; then
+      echo "##vso[task.logissue type=error]Found $n copies of admin-data-load/admin_data_load.py: `echo $hits`. Delete the stale ones."
+      exit 1
+    fi
+    dir=`dirname "$hits"`
+    echo "Tool folder: $dir"
+    # Read-only: nothing later in the run can repoint it.
+    echo "##vso[task.setvariable variable=ADL_DIR;isreadonly=true]$BUILD_SOURCESDIRECTORY/$dir"
+  displayName: 'Locate tool'
+  workingDirectory: '$(Build.SourcesDirectory)'
+
+# UsePythonVersion@0 only searches the agent tool cache, so it fails on
+# self-hosted agents even with Python installed. Take the newest python3 >= 3.9
+# on PATH; the tool needs only the standard library, so no venv or pip.
+- bash: |
+    exe=""
+    for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 python3; do
+      p=`command -v "$c" 2>/dev/null` || continue
+      if "$p" -c 'import sys, ssl; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+        exe="$p"
+        break
+      fi
+    done
+    if [ -z "$exe" ]; then
+      echo "##vso[task.logissue type=error]No python3 >= 3.9 (with ssl) on this agent's PATH. Admin fix on RHEL: sudo dnf install -y python3.11, then in the agent directory run ./env.sh and restart the agent service so it sees the new PATH."
+      exit 1
+    fi
+    echo "Python: `"$exe" --version 2>&1` ($exe)"
+    echo "##vso[task.setvariable variable=PYTHON_EXE;isreadonly=true]$exe"
+  displayName: 'Find Python'
+
+# Run-dialog values reach the script through env, never pasted into the script
+# text, so a quote typed into 'file' cannot run as a command; env and confirm
+# have $ replaced, so they cannot form a $(macro).
+#
+# The env keys are ADL_* names that no group variable has: the agent exports
+# public variables into the environment after applying env:, so a plain group
+# variable of the same name as a key would replace the mapping. The script
+# reads nothing else.
+#
+# The template expressions are expanded when the run is queued, leaving macros
+# such as $(DEV_1_PC) and $(DEV_1) that are resolved from the variable group
+# just before the step runs -- secrets included, since they are mapped here
+# explicitly (ADO never hands an unmapped secret to a script). A variable the
+# group does not define stays as the literal text $(NAME), which the script
+# treats as unset: DEV_1_PC unset -> DEV_1 is used; DEV_1_USERNAME and
+# DEV_1_PASSWORD unset -> the shared username and password.
+- bash: |
+    "$PYTHON_EXE" "$ADL_DIR/admin_data_load.py" \
+      --action "$ADL_ACTION" \
+      --env "$ADL_ENV" \
+      --product "$ADL_PRODUCT" \
+      --file "$ADL_FILE" \
+      --confirm "$ADL_CONFIRM"
+  displayName: "${{ replace(replace(replace(parameters.action, 'validate', 'Validate'), 'import', 'Import'), 'check', 'Check') }} admin data"
+  workingDirectory: '$(Build.SourcesDirectory)'
+  timeoutInMinutes: 30
+  env:
+    ADL_ACTION:       ${{ parameters.action }}
+    ADL_ENV:          ${{ upper(replace(replace(parameters.env, '$', '_'), ' ', '')) }}
+    ADL_PRODUCT:      ${{ parameters.product }}
+    ADL_FILE:         ${{ parameters.file }}
+    ADL_CONFIRM:      ${{ replace(parameters.confirm, '$', '_') }}
+    ADL_URL_PRODUCT:  $(${{ upper(replace(replace(parameters.env, '$', '_'), ' ', '')) }}_${{ upper(parameters.product) }})
+    ADL_URL_ENV:      $(${{ upper(replace(replace(parameters.env, '$', '_'), ' ', '')) }})
+    ADL_USER:         $(username)
+    ADL_PASSWORD:     $(password)
+    ADL_USER_ENV:     $(${{ upper(replace(replace(parameters.env, '$', '_'), ' ', '')) }}_USERNAME)
+    ADL_PASSWORD_ENV: $(${{ upper(replace(replace(parameters.env, '$', '_'), ' ', '')) }}_PASSWORD)
+    # Optional group variables, each passed as ADL_<its name>; an undefined
+    # one arrives as $(NAME) and the default applies.
+    ADL_GW_VERIFY_TLS:             $(GW_VERIFY_TLS)              # default true
+    ADL_GW_CA_BUNDLE:              $(GW_CA_BUNDLE)               # internal CA .pem on the agent
+    ADL_BYPASS_PROXY:              $(BYPASS_PROXY)               # default true
+    ADL_GW_TIMEOUT:                $(GW_TIMEOUT)                 # seconds, default 600
+    ADL_GW_AUTH:                   $(GW_AUTH)                    # basic | header | both (default)
+    ADL_GW_IMPORT_OPERATION:       $(GW_IMPORT_OPERATION)        # default: found in the WSDL
+    ADL_PROD_ENV_PATTERN:          $(PROD_ENV_PATTERN)           # default ^(PROD|PRD|PRODUCTION)
+    ADL_GW_ALLOW_HTTP:             $(GW_ALLOW_HTTP)              # default false
+    ADL_GW_ALLOW_CONTEXT_MISMATCH: $(GW_ALLOW_CONTEXT_MISMATCH)  # default false

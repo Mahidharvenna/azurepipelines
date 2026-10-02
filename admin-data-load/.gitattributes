@@ -1,0 +1,4 @@
+# The pipeline runs on Linux agents. Keep the tool and the pipeline LF however
+# they are edited or committed, including from Windows with core.autocrlf=true.
+*.py text eol=lf
+*.yaml text eol=lf
