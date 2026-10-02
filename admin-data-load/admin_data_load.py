@@ -1936,9 +1936,12 @@ _NOT_ALLOWED = re.compile(r"unauthori[sz]ed access|permission|not authori[sz]ed|
 NOT_ALLOWED_HELP = ("Guidewire answers 'Bad username or password' for a wrong password, so the "
                     "password was accepted; the user may not call this service. ImportToolsAPI "
                     "checks the soapadmin (SOAP administration) system permission: give the user a "
-                    "role that has it (the base roles superuser and user_admin do). If its roles "
-                    "already have it, ask the Guidewire admins what limits this user's web-service "
-                    "calls (for example a custom authentication plugin), or which user to use.")
+                    "role that has it (the base roles superuser and user_admin do). Some "
+                    "installations also keep a list of the web services each user may call (a "
+                    "custom authentication plugin, often shown as a list of services on the "
+                    "user's screen in Administration): ImportToolsAPI must be on it, active. If "
+                    "neither explains it, ask the Guidewire admins what limits this user's "
+                    "web-service calls, or which user to use.")
 
 
 def auth_help(fault):

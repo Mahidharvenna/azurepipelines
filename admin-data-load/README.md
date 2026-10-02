@@ -286,6 +286,14 @@ environments first.
   *Import Data* screen, not for this API.) This is from the 10.x source;
   confirm it for your release.
 
+- On installations that keep a **per-user list of allowed web services**
+  (a custom authentication plugin; usually a list of services, each with a
+  date and an *Active* flag, on the user's screen in Administration):
+  `ImportToolsAPI` on that list, active. Roles alone are not enough there:
+  a user with `superuser` still gets `Unauthorized Access`. If
+  `ImportToolsAPI` is not offered in the list, the list's typelist has to be
+  extended in the Guidewire configuration and deployed first.
+
 Use a dedicated integration user (e.g. `svc_import`), not a person's account.
 The import is recorded in Guidewire as made by that user.
 
@@ -315,7 +323,7 @@ The import is recorded in Guidewire as made by that user.
 | WSDL needs credentials | Some servers protect the WSDL. `check` then retries with the credentials and says so. If it still gets 401, the user or password is wrong. |
 | `check`: login *NOT verified* | The login call gave no clear answer: `xmlToCsv` answered a fault that is not about login, or the server has no `xmlToCsv` and `SystemToolsAPI` could not be used (404, a permission refusal there, ...). `check` still passes, but the credentials have not been proven. |
 | `check`: `ImportToolsAPI.xmlToCsv refused the login` | Wrong user name or password, or an inactive user. See [What the Guidewire user needs](#what-the-guidewire-user-needs). |
-| `check`: `ImportToolsAPI.xmlToCsv refused <user>: Unauthorized Access` | The password was accepted (a wrong one gets `Bad username or password`), but the user may not call ImportToolsAPI, so the import would be refused too. Give the user a role with `soapadmin`. If its roles already have it, ask the Guidewire admins what limits the user's web-service calls (a custom authentication plugin, for example), or which user to use. |
+| `check`: `ImportToolsAPI.xmlToCsv refused <user>: Unauthorized Access` | The password was accepted (a wrong one gets `Bad username or password`), but the user may not call ImportToolsAPI, so the import would be refused too. Give the user a role with `soapadmin`. If its roles already have it, look for a per-user list of allowed web services (see [What the Guidewire user needs](#what-the-guidewire-user-needs)). Otherwise ask the Guidewire admins what limits the user's web-service calls, or which user to use. |
 | HTTP 401 / 403, or a fault with `detail: WsiAuthenticationException` | Same as above: credentials or the `soapadmin` permission. Also try `GW_AUTH=basic` or `GW_AUTH=header` if the server accepts only one style. |
 | `Bad username or password` (`WsiAuthenticationException`) | The sign-in method worked; the values didn't. Log in to the application's web page with the same `username` and password: if that fails, the password in `gw-admin-data` is wrong for this server. Re-type it rather than paste it (the tool warns about a leading or trailing space). If the web login works but this doesn't, the server checks web-service logins elsewhere (a custom authentication plugin) or the user may not call web services: ask the Guidewire admins which user to use, and give it `soapadmin`. |
 | `Multiple authentication methods provided: [HTTP Basic Authentication, Guidewire SOAP Header Authentication]` | `GW_AUTH` is `both`: Guidewire accepts one method per request. Remove `GW_AUTH` (the default picks one) or set it to `header`. |
