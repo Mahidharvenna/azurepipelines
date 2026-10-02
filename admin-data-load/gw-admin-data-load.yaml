@@ -14,8 +14,8 @@
 #
 # Run it in this order, with the same env, product and file each time:
 #   1. check     reaches the server and reads its ImportToolsAPI WSDL; with
-#                credentials set it also logs in through a read-only
-#                SystemToolsAPI.getVersion call. Writes nothing. The
+#                credentials set it also logs in through ImportToolsAPI's
+#                xmlToCsv, which only converts text. Writes nothing. The
 #                credentials are proven only if that login passes.
 #   2. validate  parses the XML file and prints what is in it; writes nothing
 #   3. import    repeats 1 and 2, then sends the file -- this writes to the

@@ -60,10 +60,11 @@ asking.
    Nothing is written. The run shows that the agent reaches the server, that
    the WSDL can be read, the exact endpoint the import will use, and which
    operation and parameters it will call. With credentials set, it also logs
-   in through `SystemToolsAPI.getVersion` (read-only) and prints the server
-   version. **The credentials are proven only when that login passes**; if
-   `check` says *NOT verified*, a wrong password or a missing `soapadmin`
-   permission shows up only on import.
+   in through ImportToolsAPI's `xmlToCsv`, which converts an empty sample and
+   writes nothing. It is the same service as the import, so it needs the same
+   `soapadmin` permission. **The credentials are proven only when that login
+   passes**; if `check` says *NOT verified*, a wrong password or a missing
+   `soapadmin` permission shows up only on import.
 5. **Run `validate`** with the same values, plus *file*
    `admin-data/dev_1/roles.xml`. Nothing is written. The run shows the file's
    root element and namespace, the root's `version` and `usePeriodicFlushes`
@@ -186,8 +187,8 @@ Guide, and the ImportToolsAPI source); check them against your release.
 ## Safety
 
 - **Check first.** The default action is `check`. `check` and `validate` never
-  send anything that could change data (`check`'s login is the read-only
-  `getVersion`). `import` repeats both and stops at the first problem, before
+  send anything that could change data (`check`'s login is `xmlToCsv`, which
+  only converts text). `import` repeats both and stops at the first problem, before
   any data is sent.
 - **Production needs `confirm`.** An env matching `PROD_ENV_PATTERN` is refused
   (exit 2, nothing sent) unless `confirm` repeats the env name exactly. Every
@@ -265,7 +266,7 @@ up these before the group holds production values:
     deployment job that targets it. A deployment job does not check out the
     repo by itself, so add `- checkout: self`.
 - **Prove the production login with `check`.** `check` proves the
-  credentials only when its `SystemToolsAPI.getVersion` login passes. If it
+  credentials only when its login passes. If it
   says *NOT verified*, the first real use of the production credentials is
   the import.
 - **Keep `ADL_*` names out of the group.** Never add a plain variable named
@@ -280,7 +281,7 @@ environments first.
   web-service API.
 - A role with the **`soapadmin`** system permission (*SOAP administration*).
   Every ImportToolsAPI operation checks it and answers a
-  `WsiAuthenticationException` fault without it. The base roles `superuser`
+  `WsiAuthenticationException` fault without it (`Unauthorized Access`). The base roles `superuser`
   and `user_admin` have it. (`viewadmin` is needed only for the
   *Import Data* screen, not for this API.) This is from the 10.x source;
   confirm it for your release.
@@ -312,8 +313,9 @@ The import is recorded in Guidewire as made by that user.
 | `No ImportToolsAPI WSDL at ...: ... HTTP 404` | The URL's context is wrong for this server, or the server does not publish ImportToolsAPI (web services not exposed, or blocked by a proxy). Open `<URL>/ws/gw/wsi/pl/ImportToolsAPI?wsdl` in a browser from a machine that can reach the server. |
 | Warning: `The WSDL imports .../soapheaders.xsd, which could not be read` | A proxy or firewall blocks `.xsd` paths. The tool continues with Guidewire's default authentication header; it fails only if the request element itself is missing. |
 | WSDL needs credentials | Some servers protect the WSDL. `check` then retries with the credentials and says so. If it still gets 401, the user or password is wrong. |
-| `check`: login *NOT verified* | `SystemToolsAPI` could not be reached or planned (404, a fault that is not about login, ...). `check` still passes, but the credentials have not been tried. |
-| `check`: `SystemToolsAPI.getVersion refused the login` | Wrong user name or password, inactive user, or missing permission. See [What the Guidewire user needs](#what-the-guidewire-user-needs). |
+| `check`: login *NOT verified* | The login call gave no clear answer: `xmlToCsv` answered a fault that is not about login, or the server has no `xmlToCsv` and `SystemToolsAPI` could not be used (404, a permission refusal there, ...). `check` still passes, but the credentials have not been proven. |
+| `check`: `ImportToolsAPI.xmlToCsv refused the login` | Wrong user name or password, or an inactive user. See [What the Guidewire user needs](#what-the-guidewire-user-needs). |
+| `check`: `ImportToolsAPI.xmlToCsv refused <user>: Unauthorized Access` | The password was accepted (a wrong one gets `Bad username or password`), but the user may not call ImportToolsAPI, so the import would be refused too. Give the user a role with `soapadmin`. If its roles already have it, ask the Guidewire admins what limits the user's web-service calls (a custom authentication plugin, for example), or which user to use. |
 | HTTP 401 / 403, or a fault with `detail: WsiAuthenticationException` | Same as above: credentials or the `soapadmin` permission. Also try `GW_AUTH=basic` or `GW_AUTH=header` if the server accepts only one style. |
 | `Bad username or password` (`WsiAuthenticationException`) | The sign-in method worked; the values didn't. Log in to the application's web page with the same `username` and password: if that fails, the password in `gw-admin-data` is wrong for this server. Re-type it rather than paste it (the tool warns about a leading or trailing space). If the web login works but this doesn't, the server checks web-service logins elsewhere (a custom authentication plugin) or the user may not call web services: ask the Guidewire admins which user to use, and give it `soapadmin`. |
 | `Multiple authentication methods provided: [HTTP Basic Authentication, Guidewire SOAP Header Authentication]` | `GW_AUTH` is `both`: Guidewire accepts one method per request. Remove `GW_AUTH` (the default picks one) or set it to `header`. |
@@ -341,10 +343,11 @@ The import is recorded in Guidewire as made by that user.
 - **SOAP 1.1, document/literal only.** This is how Guidewire publishes its
   WS-I web services. An rpc-style or SOAP-1.2-only WSDL is reported by
   `check` and not used.
-- **Not yet tested on a live Guidewire server.** The tool has been tested
-  against a simulated ImportToolsAPI and SystemToolsAPI built from the real
-  WSDLs only. Run `check`, then `validate`, then an `import` of a small file
-  in a lower environment first.
+- **Not yet proven by an import on a live Guidewire server.** `check` has run
+  against a real PolicyCenter (reachability, WSDL, endpoint, sign-in method).
+  Everything else has been tested against a simulated ImportToolsAPI and
+  SystemToolsAPI built from the real WSDLs. Run `check`, then `validate`,
+  then an `import` of a small file in a lower environment first.
 
 ## How the call is built
 
@@ -370,9 +373,17 @@ For maintainers. `check` prints each of these values.
    to the configured URL. With no usable address it is the service URL plus
    `/soap11`: Guidewire serves SOAP 1.2 at `.../ImportToolsAPI` and SOAP 1.1
    at `.../ImportToolsAPI/soap11`.
-6. With credentials set, `check` plans `SystemToolsAPI.getVersion` from
-   `<URL>/ws/gw/wsi/pl/SystemToolsAPI?wsdl` the same way and calls it. Only an
-   authentication or permission refusal fails `check`.
+6. With credentials set, `check` plans ImportToolsAPI's `xmlToCsv` from the
+   same WSDL and calls it with an empty `<import>` document of the product
+   (`http://guidewire.com/<context>/exim/import`): it only converts text, and
+   it checks the same login and `soapadmin` permission as the import. A
+   declared fault from the operation (e.g. `IllegalArgumentException`) still
+   means the login passed, because the operation runs only after the checks.
+   Only when the WSDL has no `xmlToCsv` does `check` call
+   `SystemToolsAPI.getVersion` (from `<URL>/ws/gw/wsi/pl/SystemToolsAPI?wsdl`)
+   instead; a permission refusal there is only a warning, since it says
+   nothing about ImportToolsAPI. Only an authentication or permission refusal
+   fails `check`.
 7. `import` POSTs a SOAP 1.1 envelope to the endpoint and reads the
    `ImportResults` reply: `Ok=false` or any `ErrorLog` entry is a failure, and
    fields elsewhere named like *error* or *failure* that have content are

@@ -4,8 +4,8 @@ Load one Guidewire admin-data XML file into one environment through the
 server's ImportToolsAPI web service -- the SOAP API behind import_tools.
 
     --action check     reach the server, read its ImportToolsAPI WSDL and, when
-                       credentials are set, log in with a read-only
-                       SystemToolsAPI.getVersion call; writes nothing
+                       credentials are set, log in with ImportToolsAPI's
+                       xmlToCsv, which only converts text; writes nothing
     --action validate  parse the XML file and describe it; writes nothing
     --action import    check + validate, then send the file
 
@@ -49,6 +49,10 @@ WSDL_PATHS = ("/ws/gw/wsi/pl/ImportToolsAPI", "/ws/gw/webservice/pl/ImportToolsA
 # Preference order when GW_IMPORT_OPERATION is not set.
 IMPORT_OPERATIONS = ("importXmlData", "importXml", "importData")
 # check's login test: read-only, published next to ImportToolsAPI.
+# check's login test: ImportToolsAPI.xmlToCsv -- the import's own service and
+# permission, and it only converts text. SystemToolsAPI.getVersion only when
+# the WSDL has no xmlToCsv: it can refuse a user that may import.
+LOGIN_OPERATION = "xmlToCsv"
 PROBE_SERVICE, PROBE_OPERATION = "SystemToolsAPI", "getVersion"
 MAX_FILE_BYTES = 200 * 1024 * 1024
 # Guidewire's default MaximumFileUploadSize (config.xml) for admin imports.
@@ -1268,6 +1272,26 @@ def plan_call(w, cfg, wsdl_url):
     return p
 
 
+def plan_login(w, cfg, wsdl_url):
+    """ImportToolsAPI.xmlToCsv: one string in, a string out, nothing written.
+    None when this WSDL has no usable one."""
+    try:
+        p = plan_port(w, cfg, wsdl_url)
+        chosen = [n for n in p.ops if n.lower() == LOGIN_OPERATION.lower()]
+        if not chosen:
+            return None
+        p.op = chosen[0]
+        plan_operation(w, p, p.op)
+    except Failed:
+        return None
+    resolve_auth(cfg, p)
+    strings = [x for x in p.params if x.is_string]
+    if len(strings) != 1 or any(x is not strings[0] and x.min_occurs > 0 for x in p.params):
+        return None
+    p.param = strings[0]
+    return p
+
+
 def plan_probe(w, cfg, wsdl_url):
     """SystemToolsAPI.getVersion: no parameters, nothing written."""
     p = plan_port(w, cfg, wsdl_url)
@@ -1382,11 +1406,35 @@ def soap_headers(cfg, p, length):
     return headers
 
 
-def check_login(http, cfg, wsdl_url):
-    """Log in with SystemToolsAPI.getVersion -- authenticated and read-only,
-    planned from its own WSDL like the import -- so wrong credentials show up
-    in check, not first in an import. Only a refused login or permission fails
-    check; anything else just says the login was not verified."""
+def login_call(http, cfg, p, service, text=""):
+    """POST one of check's login calls: (reply, SOAP Body, fault, problem).
+    HTTP 401/403 fails check: the server refused the credentials outright."""
+    head, tail = envelope_parts(cfg, p)
+    data = head + xml_text(text).encode("utf-8") + tail
+    say("  logging in       : %s.%s at %s" % (service, p.op, p.endpoint))
+    r = http.soap(p.endpoint, data, soap_headers(cfg, p, len(data)), min(cfg.timeout, 120),
+                  MAX_RESPONSE_BYTES, "POST %s" % p.endpoint)
+    if r.status in (401, 403):
+        raise Failed("%s.%s answered HTTP %d with the credentials from %s: Guidewire %s. %s"
+                     % (service, p.op, r.status, cfg.cred_src,
+                        "did not accept them" if r.status == 401 else "refused permission",
+                        PERMISSION_HELP))
+    try:
+        body = soap_body(r)
+    except Failed as ex:
+        return r, None, None, str(ex).rstrip(".")
+    fault = soap_fault(body)
+    if fault:
+        print_fault(fault)
+    return r, body, fault, None
+
+
+def check_login(http, cfg, w, wsdl_url):
+    """Log in so a wrong password or a missing permission shows up in check,
+    not first in an import: through ImportToolsAPI.xmlToCsv (same service and
+    permission as the import, writes nothing), else SystemToolsAPI.getVersion.
+    Only a refused login or permission fails check; anything else just says
+    the login was not verified."""
     if not cfg.has_credentials:
         field("login", "not tested: no credentials. A wrong password or a missing soapadmin "
                        "permission would show up only on import.")
@@ -1397,30 +1445,55 @@ def check_login(http, cfg, wsdl_url):
         warn("The credentials (%s) and the soapadmin permission were NOT verified: %s. Check "
              "continues; the import will be the first call that logs in." % (cfg.cred_src, why))
 
+    p = plan_login(w, cfg, wsdl_url)
+    if p is not None:
+        # An empty admin-data document of this product: nothing to convert.
+        sample = '<import xmlns="http://guidewire.com/%s/exim/import"/>' % cfg.context
+        r, body, fault, problem = login_call(http, cfg, p, "ImportToolsAPI", sample)
+        if problem:
+            return not_verified(problem)
+        if fault:
+            why = login_fault_reason(fault)
+            if why == "permission":
+                raise Failed("ImportToolsAPI.%s refused %s: %s. %s"
+                             % (p.op, cfg.cred_src, fault_summary(fault), auth_help(fault)))
+            if why:
+                raise Failed("ImportToolsAPI.%s refused the login of %s: %s. %s"
+                             % (p.op, cfg.cred_src, fault_summary(fault), auth_help(fault)))
+            if fault[3]:
+                # A declared exception comes from the operation itself, which
+                # runs only after the login and permission checks passed.
+                field("login", "accepted -- credentials from %s; ImportToolsAPI allowed them (%s "
+                               "answered %s about the empty sample)"
+                      % (cfg.cred_src, p.op, clean(", ".join(fault[3]), 100)))
+                return
+            return not_verified("ImportToolsAPI.%s answered with a SOAP Fault: %s"
+                                % (p.op, fault_summary(fault)))
+        if r.status != 200:
+            return not_verified("HTTP %d %s" % (r.status, r.reason))
+        field("login", "accepted -- credentials from %s; ImportToolsAPI allowed them"
+              % cfg.cred_src)
+        return
+
     path = urllib.parse.urlsplit(wsdl_url).path[len(urllib.parse.urlsplit(cfg.base_url).path):]
     path = path.rsplit("/", 1)[0] + "/" + PROBE_SERVICE
     try:
-        w, url, _a = fetch_wsdl(http, cfg, (path,), PROBE_SERVICE, quiet=True)
-        p = plan_probe(w, cfg, url)
+        w2, url, _a = fetch_wsdl(http, cfg, (path,), PROBE_SERVICE, quiet=True)
+        p = plan_probe(w2, cfg, url)
     except Failed as ex:
-        return not_verified(str(ex).rstrip("."))
-    head, tail = envelope_parts(cfg, p)
-    say("  logging in       : %s.%s at %s" % (PROBE_SERVICE, p.op, p.endpoint))
-    r = http.soap(p.endpoint, head + tail, soap_headers(cfg, p, len(head + tail)),
-                  min(cfg.timeout, 120), MAX_RESPONSE_BYTES, "POST %s" % p.endpoint)
-    if r.status in (401, 403):
-        raise Failed("%s.%s answered HTTP %d with the credentials from %s: Guidewire %s. %s"
-                     % (PROBE_SERVICE, p.op, r.status, cfg.cred_src,
-                        "did not accept them" if r.status == 401 else "refused permission",
-                        PERMISSION_HELP))
-    try:
-        body = soap_body(r)
-    except Failed as ex:
-        return not_verified(str(ex).rstrip("."))
-    fault = soap_fault(body)
+        return not_verified("ImportToolsAPI has no %s, and %s" % (LOGIN_OPERATION,
+                                                                    str(ex).rstrip(".")))
+    r, body, fault, problem = login_call(http, cfg, p, PROBE_SERVICE)
+    if problem:
+        return not_verified(problem)
     if fault:
-        print_fault(fault)
-        if is_auth_fault(fault):
+        why = login_fault_reason(fault)
+        if why == "permission":
+            # The password worked; this service just isn't one the user may
+            # call. ImportToolsAPI checks its own permission on import.
+            return not_verified("%s.%s refused permission (%s), which says nothing about "
+                                "ImportToolsAPI" % (PROBE_SERVICE, p.op, fault_summary(fault)))
+        if why:
             raise Failed("%s.%s refused the login of %s: %s. %s"
                          % (PROBE_SERVICE, p.op, cfg.cred_src, fault_summary(fault),
                             auth_help(fault)))
@@ -1446,7 +1519,7 @@ def do_check(cfg):
     w, wsdl_url, _used_auth = fetch_wsdl(http, cfg)
     plan = plan_call(w, cfg, wsdl_url)
     print_plan(w, plan, wsdl_url)
-    check_login(http, cfg, wsdl_url)
+    check_login(http, cfg, w, wsdl_url)
     say("  Check passed: the import operation and its request were identified.")
     return http, plan
 
@@ -1858,13 +1931,42 @@ PERMISSION_HELP = ("Guidewire refused the login or the permission: check that th
 _AUTH_DETAIL = re.compile(r"authenticat|permission|authori[sz]", re.IGNORECASE)
 
 
+_NOT_ALLOWED = re.compile(r"unauthori[sz]ed access|permission|not authori[sz]ed|access denied",
+                          re.IGNORECASE)
+NOT_ALLOWED_HELP = ("Guidewire answers 'Bad username or password' for a wrong password, so the "
+                    "password was accepted; the user may not call this service. ImportToolsAPI "
+                    "checks the soapadmin (SOAP administration) system permission: give the user a "
+                    "role that has it (the base roles superuser and user_admin do). If its roles "
+                    "already have it, ask the Guidewire admins what limits this user's web-service "
+                    "calls (for example a custom authentication plugin), or which user to use.")
+
+
 def auth_help(fault):
-    """What to do about an auth fault: the method, or the login/permission."""
+    """What to do about an auth fault: the method, the password, or the permission."""
     code, text, detail, names = fault
-    if re.search(r"multiple authentication methods", text + " " + detail, re.IGNORECASE):
+    said = text + " " + detail
+    if re.search(r"multiple authentication methods", said, re.IGNORECASE):
         return ("This server accepts one sign-in method per request: set GW_AUTH to header "
                 "(or basic) in gw-admin-data, or remove GW_AUTH=both.")
+    if re.search(r"bad user ?name or password", said, re.IGNORECASE):
+        return ("The user name or password is wrong for this server: check username and password "
+                "(or <ENV>_USERNAME and <ENV>_PASSWORD) in gw-admin-data, for example by logging "
+                "in to the application's web page with them.")
+    if _NOT_ALLOWED.search(said):
+        return NOT_ALLOWED_HELP
     return PERMISSION_HELP
+
+
+def login_fault_reason(fault):
+    """'permission' when the login worked but the call is not allowed,
+    'credentials' for any other auth fault, None for a fault that isn't one."""
+    if not is_auth_fault(fault):
+        return None
+    code, text, detail, names = fault
+    if re.search(r"multiple authentication methods|bad user ?name or password",
+                 text + " " + detail, re.IGNORECASE):
+        return "credentials"
+    return "permission" if _NOT_ALLOWED.search(text + " " + detail) else "credentials"
 
 
 def is_auth_fault(fault):
