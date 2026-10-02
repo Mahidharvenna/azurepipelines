@@ -1488,6 +1488,12 @@ def check_login(http, cfg, w, wsdl_url):
         return not_verified(problem)
     if fault:
         why = login_fault_reason(fault)
+        missing = _MISSING_PERM.search(fault[1] + " " + fault[2])
+        if why == "permission" and missing and missing.group(1).lower() == "soapadmin":
+            # Guidewire's own check, and ImportToolsAPI needs soapadmin too.
+            raise Failed("%s.%s refused %s: %s. ImportToolsAPI needs the same permission. %s"
+                         % (PROBE_SERVICE, p.op, cfg.cred_src, fault_summary(fault),
+                            auth_help(fault)))
         if why == "permission":
             # The password worked; this service just isn't one the user may
             # call. ImportToolsAPI checks its own permission on import.
@@ -1921,11 +1927,14 @@ def soap_fault(body_el):
 
 _AUTH_HINT = re.compile(r"authenticat|password|credential|permission|not authori[sz]ed|"
                         r"unauthori[sz]ed|login|access denied|soapadmin", re.IGNORECASE)
+# Base roles holding soapadmin, from PolicyCenter 10.0 roleprivileges.csv
+# (other products and releases differ).
+ROLES_WITH_SOAPADMIN = "in PolicyCenter's sample roles, superuser and integration_admin"
 PERMISSION_HELP = ("Guidewire refused the login or the permission: check that the user name and "
                    "password are right and the user is active, and that it has a role with the "
                    "soapadmin (SOAP administration) system permission, which every "
-                   "ImportToolsAPI operation checks (the base roles superuser and user_admin "
-                   "have it). Ask the Guidewire admins to check the user's roles.")
+                   "ImportToolsAPI operation checks (%s have "
+                   "it). Ask the Guidewire admins to check the user's roles." % ROLES_WITH_SOAPADMIN)
 
 
 _AUTH_DETAIL = re.compile(r"authenticat|permission|authori[sz]", re.IGNORECASE)
@@ -1933,15 +1942,31 @@ _AUTH_DETAIL = re.compile(r"authenticat|permission|authori[sz]", re.IGNORECASE)
 
 _NOT_ALLOWED = re.compile(r"unauthori[sz]ed access|permission|not authori[sz]ed|access denied",
                           re.IGNORECASE)
-NOT_ALLOWED_HELP = ("Guidewire answers 'Bad username or password' for a wrong password, so the "
-                    "password was accepted; the user may not call this service. ImportToolsAPI "
-                    "checks the soapadmin (SOAP administration) system permission: give the user a "
-                    "role that has it (the base roles superuser and user_admin do). Some "
-                    "installations also keep a list of the web services each user may call (a "
-                    "custom authentication plugin, often shown as a list of services on the "
-                    "user's screen in Administration): ImportToolsAPI must be on it, active. If "
-                    "neither explains it, ask the Guidewire admins what limits this user's "
-                    "web-service calls, or which user to use.")
+# Guidewire's own wording (platform 10.13): the permission check says
+# 'User is missing "<code>" permission, which is required for this webservice
+# call'; no credentials at all gets 'This webservice call requires
+# authentication'. 'Unauthorized Access' is in neither, so it is site code.
+_MISSING_PERM = re.compile(r'missing\s+"([^"]{1,60})"\s+permission', re.IGNORECASE)
+_SITE_RULE = re.compile(r"unauthori[sz]ed access", re.IGNORECASE)
+ACCEPTED = ("Guidewire answers 'Bad username or password' for a wrong password, so the password "
+            "was probably accepted. ")
+SITE_RULE_HELP = (ACCEPTED + "'Unauthorized Access' is not Guidewire's standard wording (its own "
+                  "permission check says 'User is missing \"soapadmin\" permission'), so this "
+                  "server's own code refused the call: typically a custom authentication plugin "
+                  "with a list of the web services each user may call, often shown on the user's "
+                  "screen in Administration. Put ImportToolsAPI on that list for this user, active. "
+                  "If the list does not offer it, the list's typelist has to be extended in the "
+                  "Guidewire configuration and deployed first. Roles do not help here, and "
+                  "neither does using su: the unrestricted user skips only Guidewire's own "
+                  "permission check, which comes after the plugin.")
+NOT_ALLOWED_HELP = (ACCEPTED + "The user may not call this service. ImportToolsAPI checks the "
+                    "soapadmin (SOAP administration) system permission: give the user a role that "
+                    "has it (%s do). Some installations also "
+                    "keep a list of the web services each user may call (a custom authentication "
+                    "plugin, often shown on the user's screen in Administration): ImportToolsAPI "
+                    "must be on it, active. If neither explains it, ask the Guidewire admins what "
+                    "limits this user's web-service calls, or which user to use."
+                    % ROLES_WITH_SOAPADMIN)
 
 
 def auth_help(fault):
@@ -1952,9 +1977,28 @@ def auth_help(fault):
         return ("This server accepts one sign-in method per request: set GW_AUTH to header "
                 "(or basic) in gw-admin-data, or remove GW_AUTH=both.")
     if re.search(r"bad user ?name or password", said, re.IGNORECASE):
-        return ("The user name or password is wrong for this server: check username and password "
-                "(or <ENV>_USERNAME and <ENV>_PASSWORD) in gw-admin-data, for example by logging "
-                "in to the application's web page with them.")
+        return ("The user name or password is wrong for this server, or the account is locked or "
+                "inactive (Guidewire gives the same answer). Check username and password (or "
+                "<ENV>_USERNAME and <ENV>_PASSWORD) in gw-admin-data, for example by logging in "
+                "to the application's web page once. Do not re-run with the same values: "
+                "Guidewire locks an account after a few failed logins (3 in the base "
+                "configuration) until an admin unlocks it.")
+    if re.search(r"no authentication service is available", said, re.IGNORECASE):
+        return ("The server has no authentication service for web services enabled: the "
+                "Guidewire admins have to fix its authentication plugins.")
+    if re.search(r"requires authentication", said, re.IGNORECASE):
+        return ("The server's authentication plugin found no user name and password it could "
+                "use, although they were sent. It may read only the other sign-in method: try "
+                "GW_AUTH=basic if GW_AUTH is header or auto, or GW_AUTH=header if it is basic. A "
+                "proxy between the agent and the server may also strip the SOAP header or the "
+                "Basic credentials.")
+    m = _MISSING_PERM.search(said)
+    if m:
+        return (ACCEPTED + "The user lacks the %s permission: give it a role that has it "
+                "(Administration > Users & Security > Roles; for soapadmin, %s have it)."
+                % (clean(m.group(1), 60), ROLES_WITH_SOAPADMIN))
+    if _SITE_RULE.search(said):
+        return SITE_RULE_HELP
     if _NOT_ALLOWED.search(said):
         return NOT_ALLOWED_HELP
     return PERMISSION_HELP
@@ -1966,10 +2010,11 @@ def login_fault_reason(fault):
     if not is_auth_fault(fault):
         return None
     code, text, detail, names = fault
-    if re.search(r"multiple authentication methods|bad user ?name or password",
-                 text + " " + detail, re.IGNORECASE):
+    said = text + " " + detail
+    if re.search(r"multiple authentication methods|bad user ?name or password|"
+                 r"requires authentication", said, re.IGNORECASE):
         return "credentials"
-    return "permission" if _NOT_ALLOWED.search(text + " " + detail) else "credentials"
+    return "permission" if _NOT_ALLOWED.search(said) else "credentials"
 
 
 def is_auth_fault(fault):
