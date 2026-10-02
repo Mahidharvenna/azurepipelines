@@ -392,9 +392,12 @@ def load_config(args):
         raise Refused("GW_TIMEOUT must be a whole number of seconds from 1 to 86400, not '%s'."
                       % clean(timeout, 40))
     cfg.timeout = int(timeout)
-    cfg.auth = setting("GW_AUTH", "both").lower()
-    if cfg.auth not in ("basic", "header", "both"):
-        raise Refused("GW_AUTH must be basic, header or both, not '%s'." % clean(cfg.auth, 40))
+    # One method per request by default: Guidewire refuses a request that
+    # carries both ("Multiple authentication methods provided").
+    cfg.auth = setting("GW_AUTH", "auto").lower()
+    if cfg.auth not in ("auto", "basic", "header", "both"):
+        raise Refused("GW_AUTH must be auto, basic, header or both, not '%s'."
+                      % clean(cfg.auth, 40))
     cfg.op_override = setting("GW_IMPORT_OPERATION")
 
     # Credentials: <ENV>_USERNAME + <ENV>_PASSWORD together, else the shared
@@ -416,6 +419,11 @@ def load_config(args):
         cfg.user, cfg.password = env("ADL_USER"), env("ADL_PASSWORD", strip=False)
         cfg.cred_src = "username / password (shared)"
     add_secret(cfg.password)
+    if cfg.password and cfg.password != cfg.password.strip():
+        # A pasted value often brings a trailing space; Guidewire then says
+        # only "Bad username or password".
+        warn("The password (%s) starts or ends with a space. If that isn't part of it, "
+             "re-type it in gw-admin-data." % cfg.cred_src)
     # As sent in the SOAP header, so a server that echoes the request can't
     # show it either.
     if cfg.password:
@@ -494,7 +502,9 @@ def print_config(cfg):
                   if cfg.verify_tls else "OFF (GW_VERIFY_TLS=false)")
         field("proxy", "bypassed" if cfg.bypass_proxy else "system settings")
         field("timeout", "%d s" % cfg.timeout)
-        field("auth", {"basic": "HTTP Basic", "header": "Guidewire SOAP header",
+        field("auth", {"auto": "auto: the Guidewire SOAP header when the WSDL declares it, "
+                               "else HTTP Basic",
+                       "basic": "HTTP Basic", "header": "Guidewire SOAP header",
                        "both": "HTTP Basic + Guidewire SOAP header"}[cfg.auth])
     if cfg.has_url and not cfg.verify_tls and cfg.scheme == "https":
         warn("GW_VERIFY_TLS is false: the server's certificate is not checked in this run.")
@@ -1200,6 +1210,16 @@ def plan_operation(w, p, name):
                                             "Guidewire's username/password fields are used")
 
 
+def resolve_auth(cfg, p):
+    """The one sign-in method a plan uses: Guidewire refuses a request that
+    carries two. auto = the SOAP header when the WSDL declares it, else Basic."""
+    p.auth_mode = cfg.auth
+    p.auth_from = "GW_AUTH"
+    if cfg.auth == "auto":
+        p.auth_mode = "header" if p.auth_header_source.startswith("declared") else "basic"
+        p.auth_from = "auto"
+
+
 def plan_call(w, cfg, wsdl_url):
     """The import call."""
     p = plan_port(w, cfg, wsdl_url)
@@ -1225,6 +1245,7 @@ def plan_call(w, cfg, wsdl_url):
         p.op_source = "first of %s" % ", ".join(IMPORT_OPERATIONS)
     p.op = chosen[0]
     plan_operation(w, p, p.op)
+    resolve_auth(cfg, p)
 
     params = p.params
     strings = [x for x in params if x.is_string]
@@ -1255,6 +1276,7 @@ def plan_probe(w, cfg, wsdl_url):
         raise Failed("%s has no %s operation" % (PROBE_SERVICE, PROBE_OPERATION))
     p.op = chosen[0]
     plan_operation(w, p, p.op)
+    resolve_auth(cfg, p)
     needed = [x.name for x in p.params if x.min_occurs > 0]
     if needed:
         raise Failed("%s.%s wants parameters (%s)" % (PROBE_SERVICE, p.op, ", ".join(needed)))
@@ -1285,6 +1307,9 @@ def print_plan(w, p, wsdl_url):
                "   <- the file goes here" if x is p.param else
                ("   (optional, left out)" if x.min_occurs == 0 else "")))
     field("auth header", "%s  (%s)" % (qn_text(p.auth_header), p.auth_header_source))
+    field("auth method", "%s%s" % ({"basic": "HTTP Basic", "header": "Guidewire SOAP header",
+                                     "both": "HTTP Basic + Guidewire SOAP header"}[p.auth_mode],
+                                    "  (%s)" % p.auth_from))
 
 
 # --------------------------------------------------------------------------
@@ -1352,7 +1377,7 @@ def soap_headers(cfg, p, length):
                "Accept": "text/xml, application/soap+xml, */*",
                "Content-Length": str(length),
                "User-Agent": "gw-admin-data-load"}
-    if cfg.auth in ("basic", "both"):
+    if p.auth_mode in ("basic", "both"):
         headers["Authorization"] = "Basic " + cfg.basic_token
     return headers
 
@@ -1398,7 +1423,7 @@ def check_login(http, cfg, wsdl_url):
         if is_auth_fault(fault):
             raise Failed("%s.%s refused the login of %s: %s. %s"
                          % (PROBE_SERVICE, p.op, cfg.cred_src, fault_summary(fault),
-                            PERMISSION_HELP))
+                            auth_help(fault)))
         return not_verified("%s.%s answered with a SOAP Fault: %s"
                             % (PROBE_SERVICE, p.op, fault_summary(fault)))
     if r.status != 200:
@@ -1702,7 +1727,7 @@ def envelope_parts(cfg, p):
     """(head, tail) bytes of a SOAP 1.1 envelope for plan p: the file's
     escaped text goes between them, or nothing for a call without one."""
     header = ""
-    if cfg.auth in ("header", "both"):
+    if p.auth_mode in ("header", "both"):
         hns, hname = p.auth_header
         uf, pf = p.auth_fields
         header = ('<soapenv:Header><gwsoap:%s xmlns:gwsoap="%s"><gwsoap:%s>%s</gwsoap:%s>'
@@ -1831,6 +1856,15 @@ PERMISSION_HELP = ("Guidewire refused the login or the permission: check that th
 
 
 _AUTH_DETAIL = re.compile(r"authenticat|permission|authori[sz]", re.IGNORECASE)
+
+
+def auth_help(fault):
+    """What to do about an auth fault: the method, or the login/permission."""
+    code, text, detail, names = fault
+    if re.search(r"multiple authentication methods", text + " " + detail, re.IGNORECASE):
+        return ("This server accepts one sign-in method per request: set GW_AUTH to header "
+                "(or basic) in gw-admin-data, or remove GW_AUTH=both.")
+    return PERMISSION_HELP
 
 
 def is_auth_fault(fault):
@@ -1984,7 +2018,7 @@ def handle_response(r, p, cfg):
         print_fault(fault)
         raise Failed("The server answered with a SOAP Fault (HTTP %d): %s.%s"
                      % (r.status, fault_summary(fault),
-                        (" " + PERMISSION_HELP) if is_auth_fault(fault) else ""))
+                        (" " + auth_help(fault)) if is_auth_fault(fault) else ""))
     if r.status != 200:
         raise Failed("HTTP %d %s with a SOAP reply that holds no Fault." % (r.status, r.reason))
     wrappers = list(body_el)

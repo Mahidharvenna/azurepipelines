@@ -208,7 +208,7 @@ steps:
     ADL_GW_CA_BUNDLE:              $(GW_CA_BUNDLE)               # internal CA .pem on the agent
     ADL_BYPASS_PROXY:              $(BYPASS_PROXY)               # default true
     ADL_GW_TIMEOUT:                $(GW_TIMEOUT)                 # seconds, default 600
-    ADL_GW_AUTH:                   $(GW_AUTH)                    # basic | header | both (default)
+    ADL_GW_AUTH:                   $(GW_AUTH)                    # auto (default) | header | basic | both
     ADL_GW_IMPORT_OPERATION:       $(GW_IMPORT_OPERATION)        # default: found in the WSDL
     ADL_PROD_ENV_PATTERN:          $(PROD_ENV_PATTERN)           # default ^(PROD|PRD|PRODUCTION)
     ADL_GW_ALLOW_HTTP:             $(GW_ALLOW_HTTP)              # default false
